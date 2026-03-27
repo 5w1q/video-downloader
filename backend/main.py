@@ -25,6 +25,8 @@ douyin_parser = DouyinParser(download_dir=downloader.DOWNLOAD_DIR)
 async def lifespan(app: FastAPI):
     init_db()
     yield
+    if os.getenv("PERSIST_DOWNLOADS", "").lower() in ("1", "true", "yes"):
+        return
     download_dir = downloader.DOWNLOAD_DIR
     if os.path.exists(download_dir):
         for f in os.listdir(download_dir):
