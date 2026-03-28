@@ -11,6 +11,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
+# 给对方「试用期」镜像时：先生成 keys/trial_public.pem，再取消下一行注释
+# COPY keys/trial_public.pem /app/keys/trial_public.pem
+
 ENV PYTHONUNBUFFERED=1
 EXPOSE 8000
 

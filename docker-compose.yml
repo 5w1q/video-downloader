@@ -7,6 +7,8 @@ services:
       - ./backend/.env
     environment:
       PERSIST_DOWNLOADS: "1"
+      # 试用期：镜像内存在 /app/keys/trial_public.pem 时必填（由 scripts/issue_trial_license.py 签发）
+      # TRIAL_LICENSE: "eyJ..."
     ports:
       - "8000:8000"
     volumes:

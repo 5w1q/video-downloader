@@ -36,6 +36,9 @@ backend/logs/
 # 本地数据库（SQLite）
 backend/data/
 
+# 试用期密钥（勿提交；给对方镜像时仅放入公钥）
+backend/keys/*.pem
+
 # 测试脚本
 backend/test_*.py
 

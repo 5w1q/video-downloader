@@ -6,6 +6,9 @@ from urllib.parse import unquote
 from dotenv import load_dotenv
 load_dotenv()
 
+from trial_gate import enforce_trial_license_or_exit
+enforce_trial_license_or_exit()
+
 import httpx
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
