@@ -59,6 +59,8 @@ class ParseRequest(BaseModel):
 class DownloadRequest(BaseModel):
     url: str
     format_id: str = "bestvideo+bestaudio/best"
+    # True：文件留在服务端 downloads，返回 JSON（批量脚本 / n8n）；False：返回文件流给浏览器
+    return_json: bool = False
 
 
 @app.get("/api/health")
@@ -97,6 +99,15 @@ async def download_video(req: DownloadRequest):
         filepath = result["filepath"]
         if not os.path.exists(filepath):
             raise HTTPException(status_code=500, detail="下载的文件不存在")
+
+        if req.return_json:
+            return {
+                "success": True,
+                "data": {
+                    "filename": result["filename"],
+                    "title": result.get("title", ""),
+                },
+            }
 
         return FileResponse(
             path=filepath,
@@ -152,10 +163,12 @@ async def proxy_thumbnail(url: str = Query(..., description="缩略图URL")):
 from api_summarize import router as summarize_router
 from api_auth import router as auth_router
 from api_payment import router as payment_router
+from api_bulk_download import router as bulk_download_router
 
 app.include_router(summarize_router)
 app.include_router(auth_router)
 app.include_router(payment_router)
+app.include_router(bulk_download_router)
 
 
 if __name__ == "__main__":

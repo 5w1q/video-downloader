@@ -14,6 +14,7 @@
         <span class="hidden sm:inline text-xs text-text-muted bg-primary-light px-2 py-0.5 rounded-full">万能视频下载</span>
       </a>
       <nav class="hidden md:flex items-center gap-6 text-sm text-text-secondary" aria-label="主导航">
+        <a href="#bulk-download" class="hover:text-primary transition-colors" title="表格批量下载">批量下载</a>
         <a href="#features" class="hover:text-primary transition-colors" title="查看SaveAny功能特性">功能特性</a>
         <a href="#how-to-use" class="hover:text-primary transition-colors" title="了解如何使用SaveAny下载视频">使用教程</a>
         <a href="#comparison" class="hover:text-primary transition-colors" title="SaveAny与其他工具对比">工具对比</a>

@@ -43,6 +43,7 @@
           </div>
         </div>
       </section>
+      <BulkDownloadSection />
       <FeatureSection />
       <HowToSection />
       <ComparisonSection />
@@ -86,6 +87,7 @@ import AppHeader from './components/AppHeader.vue'
 import HeroSection from './components/HeroSection.vue'
 import VideoResult from './components/VideoResult.vue'
 import VideoSummary from './components/VideoSummary.vue'
+import BulkDownloadSection from './components/BulkDownloadSection.vue'
 import FeatureSection from './components/FeatureSection.vue'
 import HowToSection from './components/HowToSection.vue'
 import ComparisonSection from './components/ComparisonSection.vue'
