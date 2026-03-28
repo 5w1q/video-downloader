@@ -29,15 +29,17 @@ backend/logs/
 *.part
 *.log
 
-# 环境变量
+# 环境变量（含试用 token 示例，勿提交真实值）
 .env
 .env.local
+backend/.env.trial
+.env.*.local
+
+# RSA 密钥（公钥可按需单独给对方；私钥绝不可入库）
+backend/keys/*.pem
 
 # 本地数据库（SQLite）
 backend/data/
-
-# 试用期密钥（勿提交；给对方镜像时仅放入公钥）
-backend/keys/*.pem
 
 # 测试脚本
 backend/test_*.py
