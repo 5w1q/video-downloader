@@ -155,7 +155,12 @@ async function handleParse(url) {
       alert('解析失败：' + (res.error || '未知错误'))
     }
   } catch (err) {
-    const msg = err.response?.data?.detail?.error || err.response?.data?.detail || err.message
+    const d = err.response?.data?.detail
+    const msg =
+      (typeof d === 'object' && d !== null && d.error) ||
+      (typeof d === 'string' ? d : null) ||
+      err.message ||
+      '未知错误'
     alert('解析失败：' + msg)
   } finally {
     loading.value = false
