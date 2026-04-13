@@ -70,11 +70,16 @@ function authHeaders() {
   return headers
 }
 
-export async function summarizeVideo(url, language = 'zh', callbacks = {}) {
+export async function summarizeVideo(url, language = 'zh', callbacks = {}, meta = {}) {
   const response = await fetch('/api/summarize', {
     method: 'POST',
     headers: authHeaders(),
-    body: JSON.stringify({ url, language }),
+    body: JSON.stringify({
+      url,
+      language,
+      title: meta.title || '',
+      description: meta.description || '',
+    }),
   })
 
   if (!response.ok) {
@@ -84,11 +89,17 @@ export async function summarizeVideo(url, language = 'zh', callbacks = {}) {
   await handleSSEStream(response, callbacks)
 }
 
-export async function chatWithVideo(url, question, subtitleText = '', callbacks = {}) {
+export async function chatWithVideo(url, question, subtitleText = '', callbacks = {}, meta = {}) {
   const response = await fetch('/api/chat', {
     method: 'POST',
     headers: authHeaders(),
-    body: JSON.stringify({ url, question, subtitle_text: subtitleText }),
+    body: JSON.stringify({
+      url,
+      question,
+      subtitle_text: subtitleText,
+      title: meta.title || '',
+      description: meta.description || '',
+    }),
   })
 
   if (!response.ok) {

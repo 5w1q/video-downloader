@@ -17,12 +17,17 @@ router = APIRouter(prefix="/api", tags=["AI 总结"])
 class SummarizeRequest(BaseModel):
     url: str
     language: str = "zh"
+    # 与解析结果一致传入，便于模型锚定「当前是哪条视频」，避免泛泛而谈
+    title: str = ""
+    description: str = ""
 
 
 class ChatRequest(BaseModel):
     url: str
     question: str
     subtitle_text: str = ""
+    title: str = ""
+    description: str = ""
 
 
 def _check_summary_permission(user: dict | None):
@@ -97,12 +102,27 @@ async def summarize_video(req: SummarizeRequest, user: dict | None = Depends(get
 
         full_text = subtitle_data["full_text"]
         summarizer = _get_summarizer()
+        title = (req.title or "").strip()
+        description = (req.description or "").strip()[:800]
 
-        for token in summarizer.summarize_stream(full_text, req.language):
+        for token in summarizer.summarize_stream(
+            full_text,
+            req.language,
+            video_url=req.url,
+            video_title=title,
+            video_description=description,
+        ):
             yield ServerSentEvent(raw_data=json.dumps(token, ensure_ascii=False), event="summary")
 
         mindmap_md = await loop.run_in_executor(
-            None, summarizer.generate_mindmap, full_text, req.language
+            None,
+            lambda: summarizer.generate_mindmap(
+                full_text,
+                req.language,
+                video_url=req.url,
+                video_title=title,
+                video_description=description,
+            ),
         )
         yield ServerSentEvent(
             raw_data=json.dumps({"markdown": mindmap_md}, ensure_ascii=False),
@@ -145,7 +165,15 @@ async def chat_with_video(req: ChatRequest, user: dict | None = Depends(get_opti
             subtitle_text = req.subtitle_text
 
         summarizer = _get_summarizer()
-        for token in summarizer.chat_stream(subtitle_text, req.question):
+        title = (req.title or "").strip()
+        description = (req.description or "").strip()[:800]
+        for token in summarizer.chat_stream(
+            subtitle_text,
+            req.question,
+            video_url=req.url,
+            video_title=title,
+            video_description=description,
+        ):
             yield ServerSentEvent(raw_data=json.dumps(token, ensure_ascii=False), event="answer")
 
         yield ServerSentEvent(raw_data="[DONE]", event="done")

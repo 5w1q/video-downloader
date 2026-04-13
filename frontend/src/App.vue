@@ -32,6 +32,7 @@
               <VideoSummary
                 :videoUrl="currentUrl"
                 :videoTitle="videoData.title"
+                :videoDescription="videoData.description || ''"
                 :user="currentUser"
                 :key="summaryKey"
                 @loading-change="handleSummarizeLoadingChange"
