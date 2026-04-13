@@ -10,7 +10,6 @@ import httpx
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
-from starlette.background import BackgroundTask
 from pydantic import BaseModel
 
 from downloader import VideoDownloader
@@ -62,8 +61,6 @@ class DownloadRequest(BaseModel):
     format_id: str = "bestvideo+bestaudio/best"
     # True：文件留在服务端 downloads，返回 JSON（批量脚本 / n8n）；False：返回文件流给浏览器
     return_json: bool = False
-    # True：在响应发送完毕后删除服务端临时文件（浏览器另存为场景，减少磁盘占用）
-    delete_after_send: bool = False
 
 
 @app.get("/api/health")
@@ -114,22 +111,10 @@ async def download_video(req: DownloadRequest):
                 },
             }
 
-        bg = None
-        if req.delete_after_send:
-            def _unlink_safe(p: str) -> None:
-                try:
-                    if os.path.isfile(p):
-                        os.remove(p)
-                except OSError:
-                    pass
-
-            bg = BackgroundTask(_unlink_safe, filepath)
-
         return FileResponse(
             path=filepath,
             filename=result["filename"],
             media_type="application/octet-stream",
-            background=bg,
         )
     except HTTPException:
         raise

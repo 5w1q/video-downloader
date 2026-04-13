@@ -6,9 +6,9 @@
           表格批量下载
         </h2>
         <p class="text-text-secondary text-sm sm:text-base max-w-xl mx-auto">
-          上传 Excel（.xlsx）、CSV 或 TXT，识别链接后由服务器拉取视频，<strong class="text-text-primary">保存到您本机</strong>。
-          在 <strong class="text-text-primary">Chrome / Edge（HTTPS）</strong> 下可<strong class="text-text-primary">只选一次文件夹</strong>，后续文件自动写入，无需每条都点「另存为」。
-          若浏览器不支持或您取消了选文件夹，将退回为逐条下载提示。服务端传完后会删除临时文件。
+          上传 Excel（.xlsx）、CSV 或 TXT，自动识别单元格中的链接并顺序下载到
+          <strong class="text-text-primary">服务器</strong>
+          的下载目录；已成功的链接可自动跳过（可选校验磁盘文件是否存在）。
         </p>
       </div>
 
@@ -25,29 +25,15 @@
           <p class="mt-1.5 text-xs text-text-muted">支持 .xlsx / .xlsm / .csv / .txt / .json / .jsonl，多列、多工作表中的链接均会扫描。</p>
         </div>
 
-        <label v-if="folderPickerSupported" class="flex items-start gap-2 text-sm cursor-pointer select-none">
-          <input
-            v-model="preferFolderPicker"
-            type="checkbox"
-            :disabled="running"
-            class="mt-0.5 rounded border-border text-primary focus:ring-primary/30"
-          />
-          <span class="text-text-secondary">优先使用「选择文件夹」批量写入（推荐，仅 HTTPS 且浏览器支持时有效）</span>
-        </label>
-
         <div class="flex flex-col sm:flex-row sm:flex-wrap gap-4 text-sm">
           <label class="inline-flex items-center gap-2 cursor-pointer select-none">
             <input v-model="skipCompleted" type="checkbox" :disabled="running" class="rounded border-border text-primary focus:ring-primary/30" />
-            <span class="text-text-secondary">跳过本机已标记完成的链接</span>
+            <span class="text-text-secondary">跳过已下载过的链接</span>
           </label>
-          <button
-            type="button"
-            class="text-xs text-primary hover:text-primary-dark underline cursor-pointer disabled:opacity-50"
-            :disabled="running"
-            @click="clearLocalRecords"
-          >
-            清除本机完成记录
-          </button>
+          <label class="inline-flex items-center gap-2 cursor-pointer select-none">
+            <input v-model="verifyFile" type="checkbox" :disabled="running || !skipCompleted" class="rounded border-border text-primary focus:ring-primary/30" />
+            <span class="text-text-secondary">仅当服务器上仍存在文件时才跳过</span>
+          </label>
         </div>
 
         <div class="flex flex-wrap items-end gap-4">
@@ -105,23 +91,15 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
-import { bulkExtractUrls } from '../api/bulk.js'
-import { downloadViaServer } from '../api/video.js'
-import {
-  shouldSkipUrl,
-  markUrlCompleted,
-  clearBulkCompletionRecords,
-} from '../utils/bulkClientState.js'
-
-const folderPickerSupported = typeof window !== 'undefined' && typeof window.showDirectoryPicker === 'function'
-const preferFolderPicker = ref(true)
+import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
+import { bulkDownloadStream } from '../api/bulk.js'
 
 const fileInput = ref(null)
 const logBox = ref(null)
 const selectedFile = ref(null)
 const running = ref(false)
 const skipCompleted = ref(true)
+const verifyFile = ref(true)
 const delaySeconds = ref(2)
 
 const total = ref(0)
@@ -131,8 +109,6 @@ const skipCount = ref(0)
 const failCount = ref(0)
 const logLines = ref([])
 const abortController = ref(null)
-
-const DEFAULT_FORMAT = 'bestvideo+bestaudio/best'
 
 const summaryText = computed(() => {
   if (!total.value) return ''
@@ -159,67 +135,15 @@ function syncFile() {
   selectedFile.value = f || null
 }
 
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms))
-}
-
-function parseFilenameFromResponse(response, fallback = 'video.mp4') {
-  const cd = response.headers['content-disposition']
-  if (!cd) return fallback
-  const match = cd.match(/filename\*?=(?:UTF-8'')?([^;\n]+)/i)
-  if (!match) return fallback
-  try {
-    return decodeURIComponent(match[1].replace(/"/g, ''))
-  } catch {
-    return fallback
-  }
-}
-
-function sanitizeBaseName(name) {
-  const s = (name || 'video.mp4').replace(/[/\\?%*:|"<>]/g, '_').trim() || 'video.mp4'
-  return s.length > 160 ? s.slice(0, 160) : s
-}
-
-function triggerBrowserSave(response) {
-  const filename = sanitizeBaseName(parseFilenameFromResponse(response))
-  const blob = new Blob([response.data])
-  const url = window.URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = filename
-  a.click()
-  window.URL.revokeObjectURL(url)
-  return filename
-}
-
-async function saveResponseToDirectory(dirHandle, response, index, totalCount) {
-  const fromHeader = parseFilenameFromResponse(response, `video_${index}.mp4`)
-  const base = sanitizeBaseName(fromHeader)
-  const prefix = `${String(index).padStart(Math.max(3, String(totalCount).length), '0')}_`
-  const name = prefix + base
-  const blob = response.data instanceof Blob ? response.data : new Blob([response.data])
-  const buf = await blob.arrayBuffer()
-  const fh = await dirHandle.getFileHandle(name, { create: true })
-  const writable = await fh.createWritable()
-  try {
-    await writable.write(buf)
-  } finally {
-    await writable.close()
-  }
-  return name
-}
-
-function clearLocalRecords() {
-  if (running.value) return
-  clearBulkCompletionRecords()
-  pushLog('已清除本机「完成」记录（下次可重新下载相同链接）')
-}
-
 onMounted(() => {
   fileInput.value?.addEventListener('change', syncFile)
 })
 onBeforeUnmount(() => {
   fileInput.value?.removeEventListener('change', syncFile)
+})
+
+watch(skipCompleted, (v) => {
+  if (!v) verifyFile.value = false
 })
 
 async function start() {
@@ -234,92 +158,47 @@ async function start() {
   failCount.value = 0
   logLines.value = []
   abortController.value = new AbortController()
-  const signal = abortController.value.signal
 
-  pushLog(`开始解析：${file.name}`)
+  pushLog(`开始上传：${file.name}`)
 
   try {
-    const extracted = await bulkExtractUrls(file, signal)
-    if (!extracted.success) {
-      pushLog(`错误：${extracted.error || '解析失败'}`)
-      return
-    }
-    const urls = extracted.urls || []
-    total.value = urls.length
-    if (!urls.length) {
-      pushLog('文件中未识别到任何 http(s) 链接')
-      return
-    }
-
-    let dirHandle = null
-    if (folderPickerSupported && preferFolderPicker.value) {
-      pushLog('请在浏览器弹窗中选择一个文件夹（全部文件将写入该目录，无需每条确认）')
-      try {
-        dirHandle = await window.showDirectoryPicker({ mode: 'write' })
-        pushLog('已选择文件夹，开始逐条拉取并写入…')
-      } catch (e) {
-        if (e.name === 'AbortError') {
-          pushLog('未选择文件夹，改为逐条触发浏览器下载（部分浏览器可能需多次允许）')
-        } else {
-          pushLog(`无法使用文件夹 API（${e.message || e}），改为逐条下载`)
-        }
-        dirHandle = null
-      }
-    } else {
-      pushLog(`共 ${urls.length} 条链接：将逐条下载到本机（关闭「优先选择文件夹」可改用传统另存为）`)
-    }
-
-    for (let i = 0; i < urls.length; i++) {
-      if (signal.aborted) {
-        pushLog('已取消')
-        break
-      }
-      const url = urls[i]
-      const idx = i + 1
-      currentIndex.value = idx
-      const short = url.length > 72 ? `${url.slice(0, 72)}…` : url
-
-      if (skipCompleted.value && shouldSkipUrl(url)) {
-        skipCount.value += 1
-        pushLog(`[${idx}/${urls.length}] 跳过 ${short}（本机记录）`)
-      } else {
-        try {
-          pushLog(`[${idx}/${urls.length}] 拉取中 ${short}…`)
-          const response = await downloadViaServer(url, DEFAULT_FORMAT, {
-            deleteAfterSend: true,
-            signal,
-          })
-          let savedName
-          if (dirHandle) {
-            savedName = await saveResponseToDirectory(dirHandle, response, idx, urls.length)
-          } else {
-            savedName = triggerBrowserSave(response)
+    await bulkDownloadStream(file, {
+      signal: abortController.value.signal,
+      skipCompleted: skipCompleted.value,
+      verifyFile: verifyFile.value,
+      delaySeconds: delaySeconds.value,
+      onEvent: (data) => {
+        if (abortController.value?.signal.aborted) return
+        const ev = data.event
+        if (ev === 'start') {
+          total.value = data.total || 0
+          pushLog(`共识别 ${data.total} 条链接（来源：${data.source_name || file.name}）`)
+        } else if (ev === 'item') {
+          currentIndex.value = data.index || 0
+          const short = (data.url || '').length > 72 ? `${(data.url || '').slice(0, 72)}…` : (data.url || '')
+          if (data.status === 'skip') {
+            skipCount.value += 1
+            pushLog(`[${data.index}/${data.total}] 跳过 ${short} — ${data.message || ''}`)
+          } else if (data.status === 'ok') {
+            okCount.value += 1
+            pushLog(`[${data.index}/${data.total}] 成功 ${short} → ${data.filename || ''}`)
+          } else if (data.status === 'fail') {
+            failCount.value += 1
+            pushLog(`[${data.index}/${data.total}] 失败 ${short} — ${data.message || '未知错误'}`)
           }
-          markUrlCompleted(url, savedName, '')
-          okCount.value += 1
-          pushLog(`[${idx}/${urls.length}] 成功 → ${savedName}`)
-        } catch (e) {
-          if (signal.aborted || e.name === 'CanceledError' || e.code === 'ERR_CANCELED') {
-            pushLog('已取消')
-            break
-          }
-          failCount.value += 1
-          const msg = e.response?.data?.detail?.error || e.response?.data?.detail || e.message || '未知错误'
-          pushLog(`[${idx}/${urls.length}] 失败 ${short} — ${typeof msg === 'string' ? msg : JSON.stringify(msg)}`)
+        } else if (ev === 'done') {
+          okCount.value = data.ok ?? okCount.value
+          skipCount.value = data.skip ?? skipCount.value
+          failCount.value = data.fail ?? failCount.value
+          pushLog(`全部结束：成功 ${data.ok}，跳过 ${data.skip}，失败 ${data.fail}`)
+        } else if (ev === 'error') {
+          pushLog(`错误：${data.message || '未知错误'}`)
         }
-      }
-
-      if (i < urls.length - 1 && delaySeconds.value > 0 && !signal.aborted) {
-        await sleep(Math.min(60, Math.max(0, delaySeconds.value)) * 1000)
-      }
-    }
-
-    if (!signal.aborted) {
-      pushLog(`全部结束：成功 ${okCount.value}，跳过 ${skipCount.value}，失败 ${failCount.value}`)
-    }
+      },
+    })
   } catch (e) {
     if (e.name === 'AbortError') {
-      pushLog('已取消')
+      pushLog('已取消（连接已断开，服务端可能仍在处理当前这一条）')
     } else {
       pushLog(`请求异常：${e.message || e}`)
     }

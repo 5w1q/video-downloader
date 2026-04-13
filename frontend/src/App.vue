@@ -32,7 +32,6 @@
               <VideoSummary
                 :videoUrl="currentUrl"
                 :videoTitle="videoData.title"
-                :videoDescription="videoData.description || ''"
                 :user="currentUser"
                 :key="summaryKey"
                 @loading-change="handleSummarizeLoadingChange"
@@ -156,12 +155,7 @@ async function handleParse(url) {
       alert('解析失败：' + (res.error || '未知错误'))
     }
   } catch (err) {
-    const d = err.response?.data?.detail
-    const msg =
-      (typeof d === 'object' && d !== null && d.error) ||
-      (typeof d === 'string' ? d : null) ||
-      err.message ||
-      '未知错误'
+    const msg = err.response?.data?.detail?.error || err.response?.data?.detail || err.message
     alert('解析失败：' + msg)
   } finally {
     loading.value = false
@@ -171,9 +165,7 @@ async function handleParse(url) {
 async function handleDownload(formatId) {
   downloading.value = true
   try {
-    const response = await downloadViaServer(currentUrl.value, formatId, {
-      deleteAfterSend: true,
-    })
+    const response = await downloadViaServer(currentUrl.value, formatId)
     const contentDisposition = response.headers['content-disposition']
     let filename = 'video.mp4'
     if (contentDisposition) {

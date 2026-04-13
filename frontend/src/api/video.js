@@ -26,20 +26,11 @@ export function getDownloadUrl() {
   return '/api/download'
 }
 
-/**
- * @param {string} url
- * @param {string} formatId
- * @param {{ deleteAfterSend?: boolean, signal?: AbortSignal }} [options]
- */
-export async function downloadViaServer(url, formatId, options = {}) {
-  const { deleteAfterSend = false, signal } = options
-  return api.post(
+export async function downloadViaServer(url, formatId) {
+  const response = await api.post(
     '/download',
-    {
-      url,
-      format_id: formatId,
-      delete_after_send: deleteAfterSend,
-    },
-    { responseType: 'blob', timeout: 600000, signal }
+    { url, format_id: formatId },
+    { responseType: 'blob', timeout: 600000 }
   )
+  return response
 }

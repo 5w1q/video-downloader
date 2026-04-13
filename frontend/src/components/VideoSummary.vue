@@ -279,8 +279,6 @@ import { summarizeVideo, chatWithVideo } from '../api/summarize.js'
 const props = defineProps({
   videoUrl: { type: String, required: true },
   videoTitle: { type: String, default: '' },
-  /** 解析接口返回的简介片段，与标题一并传给总结 API 作锚定 */
-  videoDescription: { type: String, default: '' },
   user: { type: Object, default: null },
 })
 const emit = defineEmits(['loading-change', 'need-login'])
@@ -653,10 +651,6 @@ async function startSummarize() {
   loadingMessage.value = '正在提取视频字幕...'
 
   try {
-    const summarizeMeta = {
-      title: props.videoTitle || '',
-      description: props.videoDescription || '',
-    }
     await summarizeVideo(props.videoUrl, 'zh', {
       subtitle: (data) => {
         try {
@@ -678,8 +672,11 @@ async function startSummarize() {
       quota: (data) => {
         try { quotaInfo.value = JSON.parse(data) } catch {}
       },
-      done: () => {},
+      done: () => {
+        loading.value = false
+      },
       error: (data) => {
+        loading.value = false
         try {
           const parsed = JSON.parse(data)
           if (parsed.need_login) {
@@ -691,11 +688,10 @@ async function startSummarize() {
           alert('总结失败: ' + data)
         }
       },
-    }, summarizeMeta)
+    })
   } catch (err) {
-    alert('总结请求失败: ' + err.message)
-  } finally {
     loading.value = false
+    alert('总结请求失败: ' + err.message)
   }
 }
 
@@ -737,8 +733,7 @@ async function sendQuestion() {
             aiMessage.content = '❌ 回答失败'
           }
         },
-      },
-      { title: props.videoTitle || '', description: props.videoDescription || '' },
+      }
     )
   } catch (err) {
     aiMessage.loading = false

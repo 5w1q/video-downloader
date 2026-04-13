@@ -28,7 +28,7 @@
 
       <!-- 搜索输入框 -->
       <div class="max-w-2xl mx-auto">
-        <form novalidate @submit.prevent="onSubmit" class="relative flex items-center" role="search" aria-label="视频链接解析">
+        <form @submit.prevent="onSubmit" class="relative flex items-center" role="search" aria-label="视频链接解析">
           <div class="relative flex-1">
             <label for="video-url-input" class="sr-only">粘贴视频链接进行解析下载</label>
             <svg class="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-text-muted" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
@@ -38,10 +38,7 @@
             <input
               id="video-url-input"
               v-model="url"
-              type="text"
-              inputmode="url"
-              autocapitalize="off"
-              spellcheck="false"
+              type="url"
               :placeholder="placeholder"
               class="w-full h-13 sm:h-14 pl-12 pr-4 rounded-full sm:rounded-r-none border border-border bg-white text-base text-text-primary placeholder:text-text-muted focus:outline-none focus:ring-2 focus:ring-primary/30 focus:border-primary transition-all shadow-sm"
               :disabled="loading"
@@ -78,13 +75,6 @@
           </button>
         </form>
 
-        <p
-          v-if="loading"
-          class="mt-3 text-xs text-amber-900/90 bg-amber-50 border border-amber-100 rounded-xl px-3 py-2 max-w-xl mx-auto leading-relaxed"
-        >
-          正在向视频源站请求信息，若超过约 1 分钟未出结果，多为平台限速或跨境网络较慢；请保持页面打开，最长可能约 10 分钟。
-        </p>
-
         <div v-if="showSlogan" class="flex flex-wrap items-center justify-center gap-3 mt-5 text-xs text-text-muted">
           <span>试试：</span>
           <button
@@ -120,21 +110,8 @@ const examples = [
   { label: 'Twitter/X', url: 'https://x.com/elonmusk/status/1234567890' },
 ]
 
-function stripInvisible(s) {
-  let t = (s || '').trim()
-  for (const ch of ['\u200b', '\u200c', '\u200d', '\ufeff', '\u2060']) {
-    t = t.split(ch).join('')
-  }
-  return t.trim()
-}
-
 function normalizeUrl(raw) {
-  let u = stripInvisible(raw)
-  if (!u) return ''
-  const low = u.toLowerCase()
-  if (!low.startsWith('http://') && !low.startsWith('https://')) {
-    u = `https://${u.replace(/^\/+/, '')}`
-  }
+  let u = raw
   if (u.includes('bilibili.com') && !u.includes('www.bilibili.com')) {
     u = u.replace('bilibili.com', 'www.bilibili.com')
   }
@@ -142,9 +119,9 @@ function normalizeUrl(raw) {
 }
 
 function onSubmit() {
-  const normalized = normalizeUrl(url.value)
-  if (!normalized) return
-  url.value = normalized
-  emit('parse', normalized)
+  const trimmed = url.value.trim()
+  if (trimmed) {
+    emit('parse', normalizeUrl(trimmed))
+  }
 }
 </script>

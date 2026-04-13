@@ -328,12 +328,6 @@ class SubtitleExtractor:
             "writesubtitles": True,
             "writeautomaticsub": True,
             "skip_download": True,
-            "socket_timeout": 45,
-            "extractor_args": {
-                "youtube": {
-                    "player_client": ["android", "web"],
-                },
-            },
         }
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
@@ -536,34 +530,13 @@ class VideoSummarizer:
         )
         self.model = "deepseek-chat"
 
-    def summarize_stream(
-        self,
-        subtitle_text: str,
-        language: str = "zh",
-        *,
-        video_url: str = "",
-        video_title: str = "",
-        video_description: str = "",
-    ):
+    def summarize_stream(self, subtitle_text: str, language: str = "zh"):
         """流式生成视频总结，yield 每个 token"""
-        prompt = self._build_summary_prompt(
-            subtitle_text,
-            language,
-            video_url=video_url,
-            video_title=video_title,
-            video_description=video_description,
-        )
+        prompt = self._build_summary_prompt(subtitle_text, language)
         response = self.client.chat.completions.create(
             model=self.model,
             messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "你是视频内容分析助手。你只能根据用户给出的「视频元信息」和「字幕/转写」"
-                        "进行总结；禁止编造未出现在材料中的情节、人物或结论；"
-                        "若材料过短或与标题明显不符，须如实说明信息不足。"
-                    ),
-                },
+                {"role": "system", "content": "你是一个专业的视频内容分析助手，擅长提取关键信息并生成结构化的总结。"},
                 {"role": "user", "content": prompt},
             ],
             stream=True,
@@ -575,33 +548,13 @@ class VideoSummarizer:
             if delta.content:
                 yield delta.content
 
-    def generate_mindmap(
-        self,
-        subtitle_text: str,
-        language: str = "zh",
-        *,
-        video_url: str = "",
-        video_title: str = "",
-        video_description: str = "",
-    ) -> str:
+    def generate_mindmap(self, subtitle_text: str, language: str = "zh") -> str:
         """生成思维导图 Markdown（非流式，一次性返回）"""
-        prompt = self._build_mindmap_prompt(
-            subtitle_text,
-            language,
-            video_url=video_url,
-            video_title=video_title,
-            video_description=video_description,
-        )
+        prompt = self._build_mindmap_prompt(subtitle_text, language)
         response = self.client.chat.completions.create(
             model=self.model,
             messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "你是思维导图助手。节点内容必须来自用户提供的字幕/转写与视频元信息，"
-                        "不要添加材料中不存在的主题分支。"
-                    ),
-                },
+                {"role": "system", "content": "你是一个专业的思维导图生成助手，擅长将内容组织为清晰的层级结构。"},
                 {"role": "user", "content": prompt},
             ],
             stream=False,
@@ -610,33 +563,13 @@ class VideoSummarizer:
         )
         return response.choices[0].message.content
 
-    def chat_stream(
-        self,
-        subtitle_text: str,
-        question: str,
-        *,
-        video_url: str = "",
-        video_title: str = "",
-        video_description: str = "",
-    ):
+    def chat_stream(self, subtitle_text: str, question: str):
         """基于视频内容的 AI 问答，流式返回"""
-        prompt = self._build_chat_prompt(
-            subtitle_text,
-            question,
-            video_url=video_url,
-            video_title=video_title,
-            video_description=video_description,
-        )
+        prompt = self._build_chat_prompt(subtitle_text, question)
         response = self.client.chat.completions.create(
             model=self.model,
             messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "你是视频问答助手。只根据提供的视频元信息与字幕/转写作答；"
-                        "材料中没有的信息须明确说明无法从视频中得知，不要臆测。"
-                    ),
-                },
+                {"role": "system", "content": "你是一个视频内容问答助手。根据提供的视频字幕内容来回答用户的问题。如果问题超出视频内容范围，请诚实告知。"},
                 {"role": "user", "content": prompt},
             ],
             stream=True,
@@ -649,46 +582,10 @@ class VideoSummarizer:
                 yield delta.content
 
     @staticmethod
-    def _video_context_header(
-        *,
-        video_url: str = "",
-        video_title: str = "",
-        video_description: str = "",
-    ) -> str:
-        lines = [
-            "【任务说明】下面是一条具体视频的材料。你必须严格围绕该视频的字幕/转写与元信息作答，"
-            "不要使用与材料无关的通用百科式填充。",
-            "",
-        ]
-        if video_url:
-            lines.append(f"【视频链接】{video_url.strip()}")
-        if video_title:
-            lines.append(f"【视频标题】{video_title.strip()}")
-        if video_description:
-            lines.append(f"【视频简介摘录】{video_description.strip()}")
-        lines.append("")
-        lines.append("【正文依据】以下「字幕/转写」来自该视频（可能含自动字幕误差）。")
-        lines.append("")
-        return "\n".join(lines)
-
-    @staticmethod
-    def _build_summary_prompt(
-        subtitle_text: str,
-        language: str,
-        *,
-        video_url: str = "",
-        video_title: str = "",
-        video_description: str = "",
-    ) -> str:
+    def _build_summary_prompt(subtitle_text: str, language: str) -> str:
         truncated = subtitle_text[:15000]
         lang_hint = "中文" if language.startswith("zh") else "与原文相同的语言"
-        header = VideoSummarizer._video_context_header(
-            video_url=video_url,
-            video_title=video_title,
-            video_description=video_description,
-        )
-        return f"""{header}
-请对以上视频的字幕/转写进行深度总结，使用{lang_hint}输出。概述与大纲须能被下列字幕内容支撑；若字幕过短或信息不足，在「视频概述」中说明。
+        return f"""请对以下视频字幕内容进行深度总结分析，使用{lang_hint}输出。
 
 要求输出格式：
 ## 视频概述
@@ -704,27 +601,14 @@ class VideoSummarizer:
 （用1-2句话给出整体评价或一句话总结）
 
 ---
-字幕/转写全文：
+视频字幕内容：
 {truncated}"""
 
     @staticmethod
-    def _build_mindmap_prompt(
-        subtitle_text: str,
-        language: str,
-        *,
-        video_url: str = "",
-        video_title: str = "",
-        video_description: str = "",
-    ) -> str:
+    def _build_mindmap_prompt(subtitle_text: str, language: str) -> str:
         truncated = subtitle_text[:15000]
         lang_hint = "中文" if language.startswith("zh") else "与原文相同的语言"
-        header = VideoSummarizer._video_context_header(
-            video_url=video_url,
-            video_title=video_title,
-            video_description=video_description,
-        )
-        return f"""{header}
-请将以上视频的字幕/转写整理为思维导图，使用{lang_hint}输出。根节点应体现该视频的实际主题（可结合标题），分支须来自字幕内容。
+        return f"""请将以下视频字幕内容整理为思维导图结构，使用{lang_hint}输出。
 
 要求：
 1. 使用 Markdown 标题层级格式（# 一级标题，## 二级标题，### 三级标题）
@@ -736,32 +620,21 @@ class VideoSummarizer:
 7. 只输出 Markdown 内容，不要其他说明文字
 
 ---
-字幕/转写全文：
+视频字幕内容：
 {truncated}"""
 
     @staticmethod
-    def _build_chat_prompt(
-        subtitle_text: str,
-        question: str,
-        *,
-        video_url: str = "",
-        video_title: str = "",
-        video_description: str = "",
-    ) -> str:
+    def _build_chat_prompt(subtitle_text: str, question: str) -> str:
         truncated = subtitle_text[:12000]
-        header = VideoSummarizer._video_context_header(
-            video_url=video_url,
-            video_title=video_title,
-            video_description=video_description,
-        )
-        return f"""{header}
-字幕/转写全文：
+        return f"""以下是一个视频的字幕内容，请根据这些内容回答用户的问题。
+
+视频字幕内容：
 {truncated}
 
 ---
 用户问题：{question}
 
-请仅基于上述视频元信息与字幕/转写回答。若材料中没有相关信息，请直接说明。"""
+请基于视频内容给出准确、详细的回答。如果视频内容中没有相关信息，请诚实说明。"""
 
 
 def _time_to_seconds_flex(time_str: str) -> float:
