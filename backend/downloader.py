@@ -58,6 +58,13 @@ class VideoDownloader:
             "no_warnings": True,
             "extract_flat": False,
             "noplaylist": True,
+            # 加快元数据拉取、避免长时间无响应（仍取决于源站）
+            "socket_timeout": 45,
+            "extractor_args": {
+                "youtube": {
+                    "player_client": ["android", "web"],
+                },
+            },
         }
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
@@ -159,6 +166,12 @@ class VideoDownloader:
             "quiet": True,
             "no_warnings": True,
             "noplaylist": True,
+            "socket_timeout": 120,
+            "extractor_args": {
+                "youtube": {
+                    "player_client": ["android", "web"],
+                },
+            },
         }
 
         if self.has_ffmpeg:

@@ -678,11 +678,8 @@ async function startSummarize() {
       quota: (data) => {
         try { quotaInfo.value = JSON.parse(data) } catch {}
       },
-      done: () => {
-        loading.value = false
-      },
+      done: () => {},
       error: (data) => {
-        loading.value = false
         try {
           const parsed = JSON.parse(data)
           if (parsed.need_login) {
@@ -696,8 +693,9 @@ async function startSummarize() {
       },
     }, summarizeMeta)
   } catch (err) {
-    loading.value = false
     alert('总结请求失败: ' + err.message)
+  } finally {
+    loading.value = false
   }
 }
 

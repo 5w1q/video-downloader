@@ -328,6 +328,12 @@ class SubtitleExtractor:
             "writesubtitles": True,
             "writeautomaticsub": True,
             "skip_download": True,
+            "socket_timeout": 45,
+            "extractor_args": {
+                "youtube": {
+                    "player_client": ["android", "web"],
+                },
+            },
         }
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)

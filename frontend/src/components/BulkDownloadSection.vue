@@ -6,9 +6,9 @@
           表格批量下载
         </h2>
         <p class="text-text-secondary text-sm sm:text-base max-w-xl mx-auto">
-          上传 Excel（.xlsx）、CSV 或 TXT，自动识别链接后<strong class="text-text-primary">逐条经浏览器另存为</strong>保存到您的电脑；
-          服务端仅在传输时暂存临时文件，传完后即删除，不长期占用服务器磁盘。
-          若浏览器提示「拦截了多次下载」，请在地址栏允许本站自动下载多个文件。
+          上传 Excel（.xlsx）、CSV 或 TXT，识别链接后由服务器拉取视频，<strong class="text-text-primary">保存到您本机</strong>。
+          在 <strong class="text-text-primary">Chrome / Edge（HTTPS）</strong> 下可<strong class="text-text-primary">只选一次文件夹</strong>，后续文件自动写入，无需每条都点「另存为」。
+          若浏览器不支持或您取消了选文件夹，将退回为逐条下载提示。服务端传完后会删除临时文件。
         </p>
       </div>
 
@@ -24,6 +24,16 @@
           />
           <p class="mt-1.5 text-xs text-text-muted">支持 .xlsx / .xlsm / .csv / .txt / .json / .jsonl，多列、多工作表中的链接均会扫描。</p>
         </div>
+
+        <label v-if="folderPickerSupported" class="flex items-start gap-2 text-sm cursor-pointer select-none">
+          <input
+            v-model="preferFolderPicker"
+            type="checkbox"
+            :disabled="running"
+            class="mt-0.5 rounded border-border text-primary focus:ring-primary/30"
+          />
+          <span class="text-text-secondary">优先使用「选择文件夹」批量写入（推荐，仅 HTTPS 且浏览器支持时有效）</span>
+        </label>
 
         <div class="flex flex-col sm:flex-row sm:flex-wrap gap-4 text-sm">
           <label class="inline-flex items-center gap-2 cursor-pointer select-none">
@@ -104,6 +114,9 @@ import {
   clearBulkCompletionRecords,
 } from '../utils/bulkClientState.js'
 
+const folderPickerSupported = typeof window !== 'undefined' && typeof window.showDirectoryPicker === 'function'
+const preferFolderPicker = ref(true)
+
 const fileInput = ref(null)
 const logBox = ref(null)
 const selectedFile = ref(null)
@@ -162,8 +175,13 @@ function parseFilenameFromResponse(response, fallback = 'video.mp4') {
   }
 }
 
+function sanitizeBaseName(name) {
+  const s = (name || 'video.mp4').replace(/[/\\?%*:|"<>]/g, '_').trim() || 'video.mp4'
+  return s.length > 160 ? s.slice(0, 160) : s
+}
+
 function triggerBrowserSave(response) {
-  const filename = parseFilenameFromResponse(response)
+  const filename = sanitizeBaseName(parseFilenameFromResponse(response))
   const blob = new Blob([response.data])
   const url = window.URL.createObjectURL(blob)
   const a = document.createElement('a')
@@ -172,6 +190,23 @@ function triggerBrowserSave(response) {
   a.click()
   window.URL.revokeObjectURL(url)
   return filename
+}
+
+async function saveResponseToDirectory(dirHandle, response, index, totalCount) {
+  const fromHeader = parseFilenameFromResponse(response, `video_${index}.mp4`)
+  const base = sanitizeBaseName(fromHeader)
+  const prefix = `${String(index).padStart(Math.max(3, String(totalCount).length), '0')}_`
+  const name = prefix + base
+  const blob = response.data instanceof Blob ? response.data : new Blob([response.data])
+  const buf = await blob.arrayBuffer()
+  const fh = await dirHandle.getFileHandle(name, { create: true })
+  const writable = await fh.createWritable()
+  try {
+    await writable.write(buf)
+  } finally {
+    await writable.close()
+  }
+  return name
 }
 
 function clearLocalRecords() {
@@ -215,7 +250,24 @@ async function start() {
       pushLog('文件中未识别到任何 http(s) 链接')
       return
     }
-    pushLog(`共识别 ${urls.length} 条链接，将依次弹出浏览器下载（请勿关闭本页）`)
+
+    let dirHandle = null
+    if (folderPickerSupported && preferFolderPicker.value) {
+      pushLog('请在浏览器弹窗中选择一个文件夹（全部文件将写入该目录，无需每条确认）')
+      try {
+        dirHandle = await window.showDirectoryPicker({ mode: 'write' })
+        pushLog('已选择文件夹，开始逐条拉取并写入…')
+      } catch (e) {
+        if (e.name === 'AbortError') {
+          pushLog('未选择文件夹，改为逐条触发浏览器下载（部分浏览器可能需多次允许）')
+        } else {
+          pushLog(`无法使用文件夹 API（${e.message || e}），改为逐条下载`)
+        }
+        dirHandle = null
+      }
+    } else {
+      pushLog(`共 ${urls.length} 条链接：将逐条下载到本机（关闭「优先选择文件夹」可改用传统另存为）`)
+    }
 
     for (let i = 0; i < urls.length; i++) {
       if (signal.aborted) {
@@ -232,14 +284,20 @@ async function start() {
         pushLog(`[${idx}/${urls.length}] 跳过 ${short}（本机记录）`)
       } else {
         try {
+          pushLog(`[${idx}/${urls.length}] 拉取中 ${short}…`)
           const response = await downloadViaServer(url, DEFAULT_FORMAT, {
             deleteAfterSend: true,
             signal,
           })
-          const filename = triggerBrowserSave(response)
-          markUrlCompleted(url, filename, '')
+          let savedName
+          if (dirHandle) {
+            savedName = await saveResponseToDirectory(dirHandle, response, idx, urls.length)
+          } else {
+            savedName = triggerBrowserSave(response)
+          }
+          markUrlCompleted(url, savedName, '')
           okCount.value += 1
-          pushLog(`[${idx}/${urls.length}] 成功 ${short} → ${filename}`)
+          pushLog(`[${idx}/${urls.length}] 成功 → ${savedName}`)
         } catch (e) {
           if (signal.aborted || e.name === 'CanceledError' || e.code === 'ERR_CANCELED') {
             pushLog('已取消')
