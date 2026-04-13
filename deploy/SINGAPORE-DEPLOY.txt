@@ -16,7 +16,7 @@ video-downloader 部署到新加坡服务器（主域 sayhi-ab.asia，子域 vid
 四、仅本机反代（推荐：Docker 不暴露公网端口）
   在项目根目录与 docker-compose.yml 同级的 deploy 目录下已有示例，可覆盖端口绑定：
     docker compose -f docker-compose.yml -f deploy/docker-compose.bind-localhost.yml up -d --build
-  web 仅监听 127.0.0.1:8080，由系统 Nginx 对外提供 80/443。
+  web 仅监听 127.0.0.1:18080（避免与常见 8080 冲突），由系统 Nginx 对外提供 80/443。
 
 五、系统 Nginx
   sudo cp deploy/nginx-video.sayhi-ab.asia.conf /etc/nginx/sites-available/video.sayhi-ab.asia
@@ -28,7 +28,7 @@ video-downloader 部署到新加坡服务器（主域 sayhi-ab.asia，子域 vid
   sudo certbot --nginx -d video.sayhi-ab.asia
 
 七、防火墙
-  放行 80、443；不必对公网开放 8080（若使用 bind-localhost 配置）。
+  放行 80、443；不必对公网开放 18080（若使用 bind-localhost 配置）。
 
 八、主站 G:\Ab 门户
   已配置入口 https://video.sayhi-ab.asia（产品研发部 > 平台子应用）。DNS 与 Nginx 就绪后即可从门户跳转。

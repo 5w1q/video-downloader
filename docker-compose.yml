@@ -8,7 +8,8 @@ services:
     environment:
       PERSIST_DOWNLOADS: "1"
     ports:
-      - "8001:8001"
+      # 宿主机 8002 → 容器内 8001（避免与其它服务占用 8001；compose 内 web 仍访问 backend:8001）
+      - "127.0.0.1:8002:8001"
     volumes:
       - ./backend/downloads:/app/downloads
       - ./backend/data:/app/data

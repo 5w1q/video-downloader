@@ -9,14 +9,14 @@
 若本机可访问与后端相同的下载目录，可传 --download-dir 仅在文件仍存在时跳过
 （避免误删文件后仍被跳过）。
 
-本机直连后端：  --base-url http://127.0.0.1:8001
-Docker 仅映射 8080： --base-url http://127.0.0.1:8080  （经 Nginx 转发 /api）
+本机直连后端：  --base-url http://127.0.0.1:8002（Docker 默认映射）；本机 python main.py 时用 http://127.0.0.1:8001
+Docker+bind-localhost 映射 18080： --base-url http://127.0.0.1:18080（经 Nginx 转发 /api）；无 bind 时多为 8080
 
 示例：
   python scripts/bulk_download_queue.py -i scripts/examples/urls.example.txt
   python scripts/bulk_download_queue.py -i links.xlsx --state-file ./bulk_state.json
   python scripts/bulk_download_queue.py -i links.xlsx --download-dir ../backend/downloads
-  python scripts/bulk_download_queue.py -i export.json --base-url http://127.0.0.1:8080
+  python scripts/bulk_download_queue.py -i export.json --base-url http://127.0.0.1:18080
 """
 
 from __future__ import annotations
@@ -260,8 +260,8 @@ def main() -> int:
     )
     p.add_argument(
         "--base-url",
-        default="http://127.0.0.1:8001",
-        help="API 根地址。Docker 仅走前端 Nginx 时用 http://127.0.0.1:8080",
+        default="http://127.0.0.1:8002",
+        help="API 根地址。bind-localhost 部署经本机 Nginx 时用 http://127.0.0.1:18080；无 bind 时多为 8080；直连 uvicorn 用 http://127.0.0.1:8001",
     )
     p.add_argument(
         "--format-id",
