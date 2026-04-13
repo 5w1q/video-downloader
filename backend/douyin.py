@@ -13,7 +13,7 @@ import time
 import logging
 from pathlib import Path
 from typing import Optional
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import parse_qs, unquote, urlparse
 
 import requests
 
@@ -44,14 +44,31 @@ MOBILE_HEADERS = {
 _URL_PATTERN = re.compile(r"https?://[^\s]+", re.IGNORECASE)
 
 
+def normalize_media_url(text: str) -> str:
+    """去掉不可见字符；无协议时补 https://（分享文案里常见 v.douyin.com/...）"""
+    t = (text or "").strip()
+    for ch in ("\u200b", "\u200c", "\u200d", "\ufeff", "\u2060"):
+        t = t.replace(ch, "")
+    if not t:
+        return t
+    low = t.lower()
+    if not low.startswith(("http://", "https://")):
+        t = "https://" + t.lstrip("/")
+    return t
+
+
 def is_douyin_url(url: str) -> bool:
     """判断是否为抖音链接"""
     douyin_domains = [
-        "douyin.com", "iesdouyin.com", "v.douyin.com",
-        "www.douyin.com", "m.douyin.com",
+        "douyin.com",
+        "douyin.cn",
+        "iesdouyin.com",
+        "v.douyin.com",
+        "www.douyin.com",
+        "m.douyin.com",
     ]
     try:
-        host = urlparse(url).netloc.lower()
+        host = urlparse(normalize_media_url(url)).netloc.lower()
         return any(d in host for d in douyin_domains)
     except Exception:
         return False
@@ -67,11 +84,23 @@ class DouyinParser:
         self.download_dir.mkdir(parents=True, exist_ok=True)
         self.session = requests.Session()
         self.session.headers.update(DEFAULT_HEADERS)
-        self.timeout = (10, 30)
+        self.timeout = (15, 45)
         self.max_retries = 3
+
+    def _with_text(self, url: str) -> str:
+        return normalize_media_url(url)
+
+    def get_item_info(self, url: str) -> dict:
+        """获取抖音作品原始元数据（供字幕提取等复用解析流程）"""
+        url = self._with_text(url)
+        share_url = self._extract_url(url)
+        resolved_url = self._resolve_redirect(share_url)
+        video_id = self._extract_video_id(resolved_url)
+        return self._fetch_item_info(video_id, resolved_url)
 
     def parse(self, url: str) -> dict:
         """解析抖音视频信息，返回统一格式"""
+        url = self._with_text(url)
         share_url = self._extract_url(url)
         resolved_url = self._resolve_redirect(share_url)
         video_id = self._extract_video_id(resolved_url)
@@ -81,6 +110,7 @@ class DouyinParser:
 
     def download(self, url: str, mode: str = "video") -> dict:
         """下载抖音视频，返回文件路径"""
+        url = self._with_text(url)
         share_url = self._extract_url(url)
         resolved_url = self._resolve_redirect(share_url)
         video_id = self._extract_video_id(resolved_url)
@@ -153,12 +183,41 @@ class DouyinParser:
         raise ValueError("无法从链接中提取视频ID")
 
     def _fetch_item_info(self, video_id: str, resolved_url: str) -> dict:
-        """获取视频元数据，优先公开 API，失败则解析分享页"""
-        try:
-            return self._fetch_via_api(video_id)
-        except Exception as e:
-            logger.warning("公开API获取失败(%s)，尝试分享页解析", e)
-            return self._fetch_via_share_page(video_id, resolved_url)
+        """获取视频元数据：Web detail → 旧 iteminfo → 分享页/嵌入 JSON"""
+        last_err: Exception | None = None
+        for label, fn in (
+            ("web_aweme_detail", lambda: self._fetch_via_web_detail(video_id)),
+            ("legacy_iteminfo", lambda: self._fetch_via_api(video_id)),
+            ("share_page", lambda: self._fetch_via_share_page(video_id, resolved_url)),
+        ):
+            try:
+                return fn()
+            except Exception as e:
+                last_err = e
+                logger.warning("抖音元数据 %s 失败: %s", label, e)
+        raise ValueError(f"抖音解析失败（已尝试多种方式）: {last_err}")
+
+    def _fetch_via_web_detail(self, video_id: str) -> dict:
+        """与 yt-dlp 一致的 Web detail 接口（无 Cookie 时也可能返回数据）"""
+        url = "https://www.douyin.com/aweme/v1/web/aweme/detail/"
+        params = {
+            "aweme_id": video_id,
+            "aid": "1128",
+            "version_name": "33.0.0",
+            "device_platform": "webapp",
+        }
+        headers = {
+            **DEFAULT_HEADERS,
+            "Referer": f"https://www.douyin.com/video/{video_id}",
+            "Accept": "application/json, text/plain, */*",
+        }
+        resp = self.session.get(url, params=params, headers=headers, timeout=self.timeout)
+        resp.raise_for_status()
+        data = resp.json()
+        detail = data.get("aweme_detail")
+        if not isinstance(detail, dict) or not detail:
+            raise ValueError("aweme_detail 为空")
+        return detail
 
     def _fetch_via_api(self, video_id: str) -> dict:
         params = {"item_ids": video_id}
@@ -195,21 +254,96 @@ class DouyinParser:
             html = self._solve_waf_and_retry(html, share_url)
 
         router_data = self._extract_router_data(html)
-        if not router_data:
-            raise ValueError("无法从分享页提取数据")
+        if router_data:
+            loader_data = router_data.get("loaderData", {})
+            for node in loader_data.values():
+                if not isinstance(node, dict):
+                    continue
+                video_info_res = node.get("videoInfoRes", {})
+                if not isinstance(video_info_res, dict):
+                    continue
+                item_list = video_info_res.get("item_list", [])
+                if item_list and isinstance(item_list[0], dict):
+                    return item_list[0]
 
-        loader_data = router_data.get("loaderData", {})
-        for node in loader_data.values():
-            if not isinstance(node, dict):
-                continue
-            video_info_res = node.get("videoInfoRes", {})
-            if not isinstance(video_info_res, dict):
-                continue
-            item_list = video_info_res.get("item_list", [])
-            if item_list and isinstance(item_list[0], dict):
-                return item_list[0]
+        for blob in self._extract_embedded_json_blobs(html):
+            item = self._find_aweme_like_item(blob)
+            if item:
+                return item
 
-        raise ValueError("分享页中未找到视频信息")
+        raise ValueError("分享页中未找到视频信息（页面结构可能已变更）")
+
+    def _extract_embedded_json_blobs(self, html: str) -> list[dict]:
+        """从分享页/客户端渲染页抽取 JSON（RENDER_DATA、__NEXT_DATA__、SIGI_STATE）"""
+        blobs: list[dict] = []
+        for pattern in (
+            r'<script[^>]*\bid=["\']RENDER_DATA["\'][^>]*>([^<]+)</script>',
+            r'<script[^>]*\bid=["\']__NEXT_DATA__["\'][^>]*>([^<]+)</script>',
+        ):
+            for m in re.finditer(pattern, html, re.I | re.DOTALL):
+                raw = m.group(1).strip()
+                try:
+                    blobs.append(json.loads(unquote(raw)))
+                except json.JSONDecodeError:
+                    try:
+                        blobs.append(json.loads(raw))
+                    except json.JSONDecodeError:
+                        continue
+        m = re.search(
+            r"window\.SIGI_STATE\s*=\s*(\{.+?\})\s*</script>",
+            html,
+            re.DOTALL,
+        )
+        if m:
+            try:
+                blobs.append(json.loads(m.group(1)))
+            except json.JSONDecodeError:
+                pass
+        return blobs
+
+    @staticmethod
+    def _find_aweme_like_item(obj) -> dict | None:
+        """在嵌套 JSON 中查找含 aweme_id + video 的作品节点"""
+
+        def walk(x, depth: int) -> dict | None:
+            if depth > 16:
+                return None
+            if isinstance(x, dict):
+                if x.get("aweme_id") and isinstance(x.get("video"), dict):
+                    return x
+                for v in x.values():
+                    r = walk(v, depth + 1)
+                    if r:
+                        return r
+            elif isinstance(x, list):
+                for v in x:
+                    r = walk(v, depth + 1)
+                    if r:
+                        return r
+            return None
+
+        return walk(obj, 0)
+
+    @staticmethod
+    def _play_url_lists_from_video(video: dict) -> list[str]:
+        """从 video 对象收集播放地址列表（兼容多码率结构）"""
+        if not isinstance(video, dict):
+            return []
+        for key in ("play_addr", "play_addr_h264", "play_addr_bytevc1"):
+            addr = video.get(key)
+            if isinstance(addr, dict):
+                urls = addr.get("url_list") or []
+                if urls:
+                    return list(urls)
+        for br in video.get("bit_rate") or []:
+            if not isinstance(br, dict):
+                continue
+            pa = br.get("play_addr")
+            if isinstance(pa, dict):
+                urls = pa.get("url_list") or []
+                if urls:
+                    return list(urls)
+        return []
 
     def _solve_waf_and_retry(self, html: str, page_url: str) -> str:
         """解决抖音 WAF 反爬验证"""
@@ -226,7 +360,11 @@ class DouyinParser:
         except (KeyError, ValueError):
             return html
 
+        deadline = time.monotonic() + 15.0
         for candidate in range(1_000_001):
+            if time.monotonic() > deadline:
+                logger.warning("抖音 WAF 求解超时，放弃本轮")
+                return html
             digest = hashlib.sha256(prefix + str(candidate).encode()).hexdigest()
             if digest == expected:
                 challenge_data["d"] = base64.b64encode(
@@ -289,11 +427,7 @@ class DouyinParser:
     def _get_media_url(self, item_info: dict, mode: str = "video") -> str:
         """提取无水印播放地址"""
         if mode == "video":
-            play_urls = (
-                item_info.get("video", {})
-                .get("play_addr", {})
-                .get("url_list", [])
-            )
+            play_urls = self._play_url_lists_from_video(item_info.get("video") or {})
             if not play_urls:
                 raise ValueError("未找到视频播放地址")
             return play_urls[0].replace("playwm", "play")
@@ -314,7 +448,7 @@ class DouyinParser:
         stats = item_info.get("statistics", {})
 
         video_info = item_info.get("video", {})
-        play_urls = video_info.get("play_addr", {}).get("url_list", [])
+        play_urls = self._play_url_lists_from_video(video_info)
         cover_urls = video_info.get("cover", {}).get("url_list", [])
         duration = video_info.get("duration", 0)
         duration_sec = duration // 1000 if duration > 1000 else duration
@@ -339,7 +473,7 @@ class DouyinParser:
             })
 
         return {
-            "id": video_id,
+            "id": str(item_info.get("aweme_id") or video_id),
             "title": title,
             "thumbnail": cover_urls[0] if cover_urls else "",
             "duration": duration_sec,

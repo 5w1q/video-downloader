@@ -9,7 +9,7 @@
 若本机可访问与后端相同的下载目录，可传 --download-dir 仅在文件仍存在时跳过
 （避免误删文件后仍被跳过）。
 
-本机直连后端：  --base-url http://127.0.0.1:8000
+本机直连后端：  --base-url http://127.0.0.1:8001
 Docker 仅映射 8080： --base-url http://127.0.0.1:8080  （经 Nginx 转发 /api）
 
 示例：
@@ -260,8 +260,8 @@ def main() -> int:
     )
     p.add_argument(
         "--base-url",
-        default="http://127.0.0.1:8000",
-        help="API 根地址。Docker 未暴露 8000 时用 http://127.0.0.1:8080",
+        default="http://127.0.0.1:8001",
+        help="API 根地址。Docker 仅走前端 Nginx 时用 http://127.0.0.1:8080",
     )
     p.add_argument(
         "--format-id",

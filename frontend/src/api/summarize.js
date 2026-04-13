@@ -14,10 +14,14 @@ async function handleSSEStream(response, callbacks) {
   let hasData = false
 
   function dispatch() {
-    if (hasData && currentEvent) {
-      const handler = callbacks[currentEvent]
-      if (handler) handler(dataLines.join('\n'))
+    if (!hasData) {
+      dataLines = []
+      currentEvent = ''
+      return
     }
+    const ev = currentEvent || 'message'
+    const handler = callbacks[ev]
+    if (handler) handler(dataLines.join('\n'))
     dataLines = []
     hasData = false
     currentEvent = ''
@@ -31,7 +35,8 @@ async function handleSSEStream(response, callbacks) {
     const lines = buffer.split('\n')
     buffer = lines.pop() || ''
 
-    for (const line of lines) {
+    for (const rawLine of lines) {
+      const line = rawLine.replace(/\r$/, '')
       if (line === '') {
         dispatch()
         continue
@@ -45,6 +50,7 @@ async function handleSSEStream(response, callbacks) {
       const field = line.slice(0, colonIdx)
       let val = line.slice(colonIdx + 1)
       if (val.startsWith(' ')) val = val.slice(1)
+      val = val.replace(/\r$/, '')
 
       if (field === 'event') {
         currentEvent = val

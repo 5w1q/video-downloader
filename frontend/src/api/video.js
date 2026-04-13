@@ -5,13 +5,20 @@ const api = axios.create({
   timeout: 120000,
 })
 
+/** 解析 / 拉直链常走 yt-dlp，冷站或反爬重试可能超过 2 分钟 */
+const PARSE_TIMEOUT_MS = 600000
+
 export async function parseVideo(url) {
-  const { data } = await api.post('/parse', { url })
+  const { data } = await api.post('/parse', { url }, { timeout: PARSE_TIMEOUT_MS })
   return data
 }
 
 export async function getDirectUrl(url, formatId) {
-  const { data } = await api.post('/direct-url', { url, format_id: formatId })
+  const { data } = await api.post(
+    '/direct-url',
+    { url, format_id: formatId },
+    { timeout: PARSE_TIMEOUT_MS }
+  )
   return data
 }
 

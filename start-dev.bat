@@ -3,7 +3,7 @@ setlocal
 cd /d "%~dp0"
 set "ROOT=%~dp0"
 
-echo Starting backend (port 8000) ...
+echo Starting backend (port 8001) ...
 start "free-video-downloader-backend" powershell -NoExit -Command "Set-Location -LiteralPath '%ROOT%backend'; python main.py"
 
 timeout /t 2 /nobreak >nul

@@ -42,13 +42,10 @@
               AI 正在生成中...
             </div>
             <!-- 免费用户剩余次数提示 -->
-            <div v-if="quotaInfo && quotaInfo.remaining >= 0 && !loading" class="mt-4 p-3 rounded-xl bg-blue-50 border border-blue-100 flex items-center justify-between">
+            <div v-if="quotaInfo && quotaInfo.remaining >= 0 && !loading" class="mt-4 p-3 rounded-xl bg-blue-50 border border-blue-100">
               <span class="text-sm text-blue-700">
                 今日剩余 AI 总结次数：<strong>{{ quotaInfo.remaining }}</strong> / {{ quotaInfo.limit }}
               </span>
-              <button v-if="quotaInfo.remaining <= 1" @click="emit('need-vip')" class="text-xs font-medium text-primary hover:underline cursor-pointer">
-                升级 VIP 无限使用
-              </button>
             </div>
           </div>
 
@@ -284,7 +281,7 @@ const props = defineProps({
   videoTitle: { type: String, default: '' },
   user: { type: Object, default: null },
 })
-const emit = defineEmits(['loading-change', 'need-login', 'need-vip'])
+const emit = defineEmits(['loading-change', 'need-login'])
 
 const tabs = [
   { key: 'summary', label: '总结摘要', icon: '📝' },
@@ -684,10 +681,6 @@ async function startSummarize() {
           const parsed = JSON.parse(data)
           if (parsed.need_login) {
             emit('need-login')
-            return
-          }
-          if (parsed.need_vip) {
-            emit('need-vip')
             return
           }
           alert(parsed.message || '总结失败')

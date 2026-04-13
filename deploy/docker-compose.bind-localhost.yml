@@ -1,0 +1,7 @@
+# 与 docker-compose.yml 叠加使用：仅将前端 Nginx 绑定到本机 8080，由宿主机 Nginx 反代。
+# （backend 仍由 compose 内网访问；若需把 8001 也限制在本机，可再改主 docker-compose 的 ports。）
+# docker compose -f docker-compose.yml -f deploy/docker-compose.bind-localhost.yml up -d --build
+services:
+  web:
+    ports:
+      - "127.0.0.1:8080:80"

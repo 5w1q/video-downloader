@@ -16,7 +16,7 @@
             </button>
           </div>
           <p class="text-sm text-text-secondary">
-            {{ isLogin ? '登录以使用 AI 视频总结和 VIP 功能' : '创建账号，开始使用全部功能' }}
+            {{ isLogin ? '登录以使用 AI 视频总结等功能' : '创建账号，开始使用全部功能' }}
           </p>
         </div>
 

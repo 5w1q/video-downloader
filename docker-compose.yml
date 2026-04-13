@@ -8,7 +8,7 @@ services:
     environment:
       PERSIST_DOWNLOADS: "1"
     ports:
-      - "8000:8000"
+      - "8001:8001"
     volumes:
       - ./backend/downloads:/app/downloads
       - ./backend/data:/app/data

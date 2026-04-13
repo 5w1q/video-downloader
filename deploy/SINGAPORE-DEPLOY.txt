@@ -1,0 +1,34 @@
+video-downloader 部署到新加坡服务器（主域 sayhi-ab.asia，子域 video.sayhi-ab.asia）
+================================================================================
+
+一、DNS（域名控制台）
+  类型 A，主机记录 video，值 = 新加坡服务器公网 IP，TTL 默认即可。
+  生效后访问：https://video.sayhi-ab.asia
+
+二、服务器目录（示例）
+  /opt/video-downloader
+  将本仓库同步到该目录（git clone / rsync / scp 均可），勿提交 node_modules；服务器上 docker build 会自行安装依赖。
+
+三、环境变量
+  在服务器创建 backend/.env（可参考本机 backend/.env，勿把密钥提交到 Git）。
+  生产环境务必设置强随机 JWT_SECRET 等。
+
+四、仅本机反代（推荐：Docker 不暴露公网端口）
+  在项目根目录与 docker-compose.yml 同级的 deploy 目录下已有示例，可覆盖端口绑定：
+    docker compose -f docker-compose.yml -f deploy/docker-compose.bind-localhost.yml up -d --build
+  web 仅监听 127.0.0.1:8080，由系统 Nginx 对外提供 80/443。
+
+五、系统 Nginx
+  sudo cp deploy/nginx-video.sayhi-ab.asia.conf /etc/nginx/sites-available/video.sayhi-ab.asia
+  sudo ln -sf /etc/nginx/sites-available/video.sayhi-ab.asia /etc/nginx/sites-enabled/
+  sudo nginx -t && sudo systemctl reload nginx
+
+六、HTTPS（Let’s Encrypt）
+  sudo apt install -y certbot python3-certbot-nginx
+  sudo certbot --nginx -d video.sayhi-ab.asia
+
+七、防火墙
+  放行 80、443；不必对公网开放 8080（若使用 bind-localhost 配置）。
+
+八、主站 G:\Ab 门户
+  已配置入口 https://video.sayhi-ab.asia（产品研发部 > 平台子应用）。DNS 与 Nginx 就绪后即可从门户跳转。
