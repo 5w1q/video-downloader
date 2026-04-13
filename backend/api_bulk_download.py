@@ -28,6 +28,18 @@ _downloader = VideoDownloader()
 _douyin = DouyinParser(download_dir=_downloader.DOWNLOAD_DIR)
 
 
+@router.post("/bulk-extract-urls")
+async def bulk_extract_urls(file: UploadFile = File(...)):
+    """仅从表格/文本中解析 http(s) 链接列表，供浏览器端逐条下载，不在此接口写磁盘。"""
+    body = await file.read()
+    name = file.filename or "upload"
+    try:
+        urls = extract_urls_from_upload(name, body)
+    except Exception as e:
+        return {"success": False, "error": f"解析文件失败: {e}", "urls": []}
+    return {"success": True, "urls": urls, "count": len(urls)}
+
+
 def _fmt_sse(obj: dict) -> str:
     return f"data: {json.dumps(obj, ensure_ascii=False)}\n\n"
 

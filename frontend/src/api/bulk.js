@@ -1,5 +1,25 @@
 /**
- * 批量上传链接表，SSE 流式进度（文件保存在服务端 downloads 目录）
+ * 从上传文件中解析链接列表（不写服务器下载目录）
+ * @param {File} file
+ * @returns {Promise<{ success: boolean, urls?: string[], count?: number, error?: string }>}
+ */
+export async function bulkExtractUrls(file, signal) {
+  const form = new FormData()
+  form.append('file', file)
+  const res = await fetch('/api/bulk-extract-urls', {
+    method: 'POST',
+    body: form,
+    signal,
+  })
+  const data = await res.json().catch(() => ({}))
+  if (!res.ok) {
+    throw new Error(data.detail || data.error || `HTTP ${res.status}`)
+  }
+  return data
+}
+
+/**
+ * 批量上传链接表，SSE 流式进度（服务端顺序下载并保存在 downloads，供脚本或旧流程使用）
  */
 
 function parseSseDataBlocks(buffer, onDataObj) {

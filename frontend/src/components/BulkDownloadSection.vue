@@ -6,9 +6,9 @@
           表格批量下载
         </h2>
         <p class="text-text-secondary text-sm sm:text-base max-w-xl mx-auto">
-          上传 Excel（.xlsx）、CSV 或 TXT，自动识别单元格中的链接并顺序下载到
-          <strong class="text-text-primary">服务器</strong>
-          的下载目录；已成功的链接可自动跳过（可选校验磁盘文件是否存在）。
+          上传 Excel（.xlsx）、CSV 或 TXT，自动识别链接后<strong class="text-text-primary">逐条经浏览器另存为</strong>保存到您的电脑；
+          服务端仅在传输时暂存临时文件，传完后即删除，不长期占用服务器磁盘。
+          若浏览器提示「拦截了多次下载」，请在地址栏允许本站自动下载多个文件。
         </p>
       </div>
 
@@ -28,12 +28,16 @@
         <div class="flex flex-col sm:flex-row sm:flex-wrap gap-4 text-sm">
           <label class="inline-flex items-center gap-2 cursor-pointer select-none">
             <input v-model="skipCompleted" type="checkbox" :disabled="running" class="rounded border-border text-primary focus:ring-primary/30" />
-            <span class="text-text-secondary">跳过已下载过的链接</span>
+            <span class="text-text-secondary">跳过本机已标记完成的链接</span>
           </label>
-          <label class="inline-flex items-center gap-2 cursor-pointer select-none">
-            <input v-model="verifyFile" type="checkbox" :disabled="running || !skipCompleted" class="rounded border-border text-primary focus:ring-primary/30" />
-            <span class="text-text-secondary">仅当服务器上仍存在文件时才跳过</span>
-          </label>
+          <button
+            type="button"
+            class="text-xs text-primary hover:text-primary-dark underline cursor-pointer disabled:opacity-50"
+            :disabled="running"
+            @click="clearLocalRecords"
+          >
+            清除本机完成记录
+          </button>
         </div>
 
         <div class="flex flex-wrap items-end gap-4">
@@ -91,15 +95,20 @@
 </template>
 
 <script setup>
-import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
-import { bulkDownloadStream } from '../api/bulk.js'
+import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
+import { bulkExtractUrls } from '../api/bulk.js'
+import { downloadViaServer } from '../api/video.js'
+import {
+  shouldSkipUrl,
+  markUrlCompleted,
+  clearBulkCompletionRecords,
+} from '../utils/bulkClientState.js'
 
 const fileInput = ref(null)
 const logBox = ref(null)
 const selectedFile = ref(null)
 const running = ref(false)
 const skipCompleted = ref(true)
-const verifyFile = ref(true)
 const delaySeconds = ref(2)
 
 const total = ref(0)
@@ -109,6 +118,8 @@ const skipCount = ref(0)
 const failCount = ref(0)
 const logLines = ref([])
 const abortController = ref(null)
+
+const DEFAULT_FORMAT = 'bestvideo+bestaudio/best'
 
 const summaryText = computed(() => {
   if (!total.value) return ''
@@ -135,15 +146,45 @@ function syncFile() {
   selectedFile.value = f || null
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+function parseFilenameFromResponse(response, fallback = 'video.mp4') {
+  const cd = response.headers['content-disposition']
+  if (!cd) return fallback
+  const match = cd.match(/filename\*?=(?:UTF-8'')?([^;\n]+)/i)
+  if (!match) return fallback
+  try {
+    return decodeURIComponent(match[1].replace(/"/g, ''))
+  } catch {
+    return fallback
+  }
+}
+
+function triggerBrowserSave(response) {
+  const filename = parseFilenameFromResponse(response)
+  const blob = new Blob([response.data])
+  const url = window.URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  a.click()
+  window.URL.revokeObjectURL(url)
+  return filename
+}
+
+function clearLocalRecords() {
+  if (running.value) return
+  clearBulkCompletionRecords()
+  pushLog('已清除本机「完成」记录（下次可重新下载相同链接）')
+}
+
 onMounted(() => {
   fileInput.value?.addEventListener('change', syncFile)
 })
 onBeforeUnmount(() => {
   fileInput.value?.removeEventListener('change', syncFile)
-})
-
-watch(skipCompleted, (v) => {
-  if (!v) verifyFile.value = false
 })
 
 async function start() {
@@ -158,47 +199,69 @@ async function start() {
   failCount.value = 0
   logLines.value = []
   abortController.value = new AbortController()
+  const signal = abortController.value.signal
 
-  pushLog(`开始上传：${file.name}`)
+  pushLog(`开始解析：${file.name}`)
 
   try {
-    await bulkDownloadStream(file, {
-      signal: abortController.value.signal,
-      skipCompleted: skipCompleted.value,
-      verifyFile: verifyFile.value,
-      delaySeconds: delaySeconds.value,
-      onEvent: (data) => {
-        if (abortController.value?.signal.aborted) return
-        const ev = data.event
-        if (ev === 'start') {
-          total.value = data.total || 0
-          pushLog(`共识别 ${data.total} 条链接（来源：${data.source_name || file.name}）`)
-        } else if (ev === 'item') {
-          currentIndex.value = data.index || 0
-          const short = (data.url || '').length > 72 ? `${(data.url || '').slice(0, 72)}…` : (data.url || '')
-          if (data.status === 'skip') {
-            skipCount.value += 1
-            pushLog(`[${data.index}/${data.total}] 跳过 ${short} — ${data.message || ''}`)
-          } else if (data.status === 'ok') {
-            okCount.value += 1
-            pushLog(`[${data.index}/${data.total}] 成功 ${short} → ${data.filename || ''}`)
-          } else if (data.status === 'fail') {
-            failCount.value += 1
-            pushLog(`[${data.index}/${data.total}] 失败 ${short} — ${data.message || '未知错误'}`)
+    const extracted = await bulkExtractUrls(file, signal)
+    if (!extracted.success) {
+      pushLog(`错误：${extracted.error || '解析失败'}`)
+      return
+    }
+    const urls = extracted.urls || []
+    total.value = urls.length
+    if (!urls.length) {
+      pushLog('文件中未识别到任何 http(s) 链接')
+      return
+    }
+    pushLog(`共识别 ${urls.length} 条链接，将依次弹出浏览器下载（请勿关闭本页）`)
+
+    for (let i = 0; i < urls.length; i++) {
+      if (signal.aborted) {
+        pushLog('已取消')
+        break
+      }
+      const url = urls[i]
+      const idx = i + 1
+      currentIndex.value = idx
+      const short = url.length > 72 ? `${url.slice(0, 72)}…` : url
+
+      if (skipCompleted.value && shouldSkipUrl(url)) {
+        skipCount.value += 1
+        pushLog(`[${idx}/${urls.length}] 跳过 ${short}（本机记录）`)
+      } else {
+        try {
+          const response = await downloadViaServer(url, DEFAULT_FORMAT, {
+            deleteAfterSend: true,
+            signal,
+          })
+          const filename = triggerBrowserSave(response)
+          markUrlCompleted(url, filename, '')
+          okCount.value += 1
+          pushLog(`[${idx}/${urls.length}] 成功 ${short} → ${filename}`)
+        } catch (e) {
+          if (signal.aborted || e.name === 'CanceledError' || e.code === 'ERR_CANCELED') {
+            pushLog('已取消')
+            break
           }
-        } else if (ev === 'done') {
-          okCount.value = data.ok ?? okCount.value
-          skipCount.value = data.skip ?? skipCount.value
-          failCount.value = data.fail ?? failCount.value
-          pushLog(`全部结束：成功 ${data.ok}，跳过 ${data.skip}，失败 ${data.fail}`)
-        } else if (ev === 'error') {
-          pushLog(`错误：${data.message || '未知错误'}`)
+          failCount.value += 1
+          const msg = e.response?.data?.detail?.error || e.response?.data?.detail || e.message || '未知错误'
+          pushLog(`[${idx}/${urls.length}] 失败 ${short} — ${typeof msg === 'string' ? msg : JSON.stringify(msg)}`)
         }
-      },
-    })
+      }
+
+      if (i < urls.length - 1 && delaySeconds.value > 0 && !signal.aborted) {
+        await sleep(Math.min(60, Math.max(0, delaySeconds.value)) * 1000)
+      }
+    }
+
+    if (!signal.aborted) {
+      pushLog(`全部结束：成功 ${okCount.value}，跳过 ${skipCount.value}，失败 ${failCount.value}`)
+    }
   } catch (e) {
     if (e.name === 'AbortError') {
-      pushLog('已取消（连接已断开，服务端可能仍在处理当前这一条）')
+      pushLog('已取消')
     } else {
       pushLog(`请求异常：${e.message || e}`)
     }

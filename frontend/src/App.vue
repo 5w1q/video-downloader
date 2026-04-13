@@ -171,7 +171,9 @@ async function handleParse(url) {
 async function handleDownload(formatId) {
   downloading.value = true
   try {
-    const response = await downloadViaServer(currentUrl.value, formatId)
+    const response = await downloadViaServer(currentUrl.value, formatId, {
+      deleteAfterSend: true,
+    })
     const contentDisposition = response.headers['content-disposition']
     let filename = 'video.mp4'
     if (contentDisposition) {
