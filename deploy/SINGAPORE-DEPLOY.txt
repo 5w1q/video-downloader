@@ -32,3 +32,17 @@ video-downloader 部署到新加坡服务器（主域 sayhi-ab.asia，子域 vid
 
 八、主站 G:\Ab 门户
   已配置入口 https://video.sayhi-ab.asia（产品研发部 > 平台子应用）。DNS 与 Nginx 就绪后即可从门户跳转。
+
+九、git pull 报「本地修改将被覆盖」或仍绑定 8080 时（与 GitHub 对齐）
+  服务器上若曾手改 deploy/、docker-compose.yml 等，pull 会失败，Docker 仍用旧端口，表现为：
+    failed to bind host port 127.0.0.1:8080
+  且 grep 18080 deploy/docker-compose.bind-localhost.yml 无输出。
+  部署目录以仓库为准时，在 /opt/video-downloader 执行（会先备份 .env，再丢弃仓库内本地改动）：
+    test -f backend/.env && sudo cp -a backend/.env /root/video-downloader.env.bak
+    rm -f deploy/docker-compose.backend-alt-port.yml
+    git fetch origin
+    git reset --hard origin/master
+    grep 18080 deploy/docker-compose.bind-localhost.yml
+  确认出现 18080 后再：
+    docker compose -f docker-compose.yml -f deploy/docker-compose.bind-localhost.yml up -d --build
+  系统 Nginx 反代须指向 127.0.0.1:18080（与 deploy/nginx-video.sayhi-ab.asia.conf 一致）。
