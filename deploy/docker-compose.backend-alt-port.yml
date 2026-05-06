@@ -1,0 +1,9 @@
+# 当宿主机 8002 仍被占用时叠加本文件，把后端改映射到 18002（容器内仍为 8001）。
+# docker compose -f docker-compose.yml -f deploy/docker-compose.bind-localhost.yml \
+#   -f deploy/docker-compose.backend-alt-port.yml up -d --build
+# 本文件须放在命令最后，以便覆盖 backend.ports。
+
+services:
+  backend:
+    ports:
+      - "127.0.0.1:18002:8001"

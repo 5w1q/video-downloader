@@ -1,0 +1,58 @@
+video-downloader 上云部署（主域 sayhi-ab.asia，子域 video.sayhi-ab.asia）
+================================================================================
+
+一、DNS（域名控制台）
+  类型 A，主机记录 video，值 = 新加坡服务器公网 IP，TTL 默认即可。
+  生效后访问：https://video.sayhi-ab.asia
+
+二、服务器目录（示例）
+  /opt/video-downloader
+  将本仓库同步到该目录（git clone / rsync / scp 均可），勿提交 node_modules；服务器上 docker build 会自行安装依赖。
+
+三、环境变量（按统一基础设施）
+  在服务器创建 backend/.env（可参考 backend/.env.example，勿把密钥提交到 Git）。
+  必填建议：
+    AB_BASE_URL=https://sayhi-ab.asia
+    APP_PUBLIC_DOMAIN=video.sayhi-ab.asia
+    FRONTEND_URL=https://video.sayhi-ab.asia
+    CORS_ALLOWED_ORIGINS=https://video.sayhi-ab.asia,https://sayhi-ab.asia
+
+  统一资源建议：
+    DATABASE_URL=postgresql://video_app:<pwd>@<pg-host>:5432/video_app
+    DB_POOL_SIZE=5
+    DB_MAX_OVERFLOW=5
+
+四、仅本机反代（推荐：Docker 不暴露公网端口）
+  在项目根目录与 docker-compose.yml 同级的 deploy 目录下已有示例，可覆盖端口绑定：
+    docker compose -f docker-compose.yml -f deploy/docker-compose.bind-localhost.yml up -d --build
+  web 仅监听 127.0.0.1:18080（避免与常见 8080 冲突），由系统 Nginx 对外提供 80/443。
+
+五、系统 Nginx
+  sudo cp deploy/nginx-video.sayhi-ab.asia.conf /etc/nginx/sites-available/video.sayhi-ab.asia
+  sudo ln -sf /etc/nginx/sites-available/video.sayhi-ab.asia /etc/nginx/sites-enabled/
+  sudo nginx -t && sudo systemctl reload nginx
+
+六、HTTPS（Let’s Encrypt）
+  sudo apt install -y certbot python3-certbot-nginx
+  sudo certbot --nginx -d video.sayhi-ab.asia
+
+七、防火墙
+  放行 80、443；不必对公网开放 18080/8002（若使用 bind-localhost 配置）。
+  数据库端口（5432）不应对公网开放。
+
+八、主站 G:\Ab 门户
+  已配置入口 https://video.sayhi-ab.asia（产品研发部 > 平台子应用）。DNS 与 Nginx 就绪后即可从门户跳转。
+
+九、git pull 报「本地修改将被覆盖」或仍绑定 8080 时（与 GitHub 对齐）
+  服务器上若曾手改 deploy/、docker-compose.yml 等，pull 会失败，Docker 仍用旧端口，表现为：
+    failed to bind host port 127.0.0.1:8080
+  且 grep 18080 deploy/docker-compose.bind-localhost.yml 无输出。
+  部署目录以仓库为准时，在 /opt/video-downloader 执行（会先备份 .env，再丢弃仓库内本地改动）：
+    test -f backend/.env && sudo cp -a backend/.env /root/video-downloader.env.bak
+    rm -f deploy/docker-compose.backend-alt-port.yml
+    git fetch origin
+    git reset --hard origin/master
+    grep 18080 deploy/docker-compose.bind-localhost.yml
+  确认出现 18080 后再：
+    docker compose -f docker-compose.yml -f deploy/docker-compose.bind-localhost.yml up -d --build
+  系统 Nginx 反代须指向 127.0.0.1:18080（与 deploy/nginx-video.sayhi-ab.asia.conf 一致）。

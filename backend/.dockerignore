@@ -1,0 +1,12 @@
+__pycache__
+*.py[cod]
+.venv
+venv
+.env
+downloads
+data
+*.log
+.git
+test_*.py
+# 切勿把私钥打入镜像
+keys/trial_private.pem
