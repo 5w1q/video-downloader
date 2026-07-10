@@ -25,6 +25,9 @@
         <h3 class="text-lg font-semibold text-text-primary leading-snug mb-2 line-clamp-2">
           {{ video.title }}
         </h3>
+        <p class="text-xs text-text-muted leading-relaxed mb-2">
+          左侧仅展示标题与信息；带时间轴的分句字幕请在<strong class="font-medium text-text-secondary">右侧「字幕文本」</strong>中查看。
+        </p>
         <div class="flex flex-wrap items-center gap-3 text-sm text-text-secondary mb-3">
           <span class="inline-flex items-center gap-1">
             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">

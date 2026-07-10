@@ -167,6 +167,20 @@ class DouyinParser:
 
         self._download_file(media_url, filepath)
 
+        try:
+            from video_title import apply_content_filename, content_title_enabled
+
+            if content_title_enabled():
+                renamed = apply_content_filename(str(filepath), url, platform_title=title)
+                return {
+                    "filepath": renamed["filepath"],
+                    "filename": renamed["filename"],
+                    "title": renamed["title"],
+                    "ext": renamed["ext"],
+                }
+        except Exception:
+            pass
+
         return {
             "filepath": str(filepath),
             "filename": filename,

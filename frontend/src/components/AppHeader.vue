@@ -14,7 +14,7 @@
         <span class="hidden sm:inline text-xs text-text-muted bg-primary-light px-2 py-0.5 rounded-full">万能视频下载</span>
       </a>
       <nav class="hidden md:flex items-center gap-6 text-sm text-text-secondary" aria-label="主导航">
-        <a href="#bulk-download" class="hover:text-primary transition-colors" title="表格批量下载">批量下载</a>
+        <a href="#keyword-download" class="hover:text-primary transition-colors" title="关键词搜索与表格批量下载">关键词下载</a>
         <a href="#features" class="hover:text-primary transition-colors" title="查看SaveAny功能特性">功能特性</a>
         <a href="#how-to-use" class="hover:text-primary transition-colors" title="了解如何使用SaveAny下载视频">使用教程</a>
         <a href="#comparison" class="hover:text-primary transition-colors" title="SaveAny与其他工具对比">工具对比</a>
@@ -27,14 +27,16 @@
           </div>
         </template>
 
-        <!-- 未登录 -->
+        <!-- 未登录：生产环境由父级整页跳转主站登录，此处仅开发/跳过门控时展示 -->
         <template v-else-if="!user">
-          <button @click="$emit('login')" class="hidden sm:inline-flex items-center px-4 py-2 rounded-full text-sm font-medium text-text-secondary hover:text-primary hover:bg-gray-50 transition-colors cursor-pointer">
-            登录
-          </button>
-          <button @click="$emit('register')" class="hidden sm:inline-flex items-center gap-1.5 px-4 py-2 rounded-full text-sm font-medium text-white bg-primary hover:bg-blue-600 transition-colors shadow-sm cursor-pointer">
-            免费注册
-          </button>
+          <template v-if="!authRedirectGate">
+            <button @click="$emit('login')" class="hidden sm:inline-flex items-center px-4 py-2 rounded-full text-sm font-medium text-text-secondary hover:text-primary hover:bg-gray-50 transition-colors cursor-pointer">
+              登录
+            </button>
+            <button @click="$emit('register')" class="hidden sm:inline-flex items-center gap-1.5 px-4 py-2 rounded-full text-sm font-medium text-white bg-primary hover:bg-blue-600 transition-colors shadow-sm cursor-pointer">
+              免费注册
+            </button>
+          </template>
         </template>
 
         <!-- 已登录：显示用户名、会员状态、剩余积分 -->
@@ -47,18 +49,9 @@
             </span>
             <span class="mx-2 text-text-muted">·</span>
             <span>积分 {{ safeCredits }}</span>
-            <button
-              @click="$emit('logout')"
-              class="ml-3 text-text-muted hover:text-primary transition-colors cursor-pointer"
-            >
-              退出
-            </button>
           </div>
           <div class="sm:hidden flex items-center gap-2 text-xs text-text-secondary">
             {{ user?.is_vip ? 'VIP' : '免费' }} · {{ safeCredits }} 积分
-            <button @click="$emit('logout')" class="text-text-muted hover:text-primary transition-colors cursor-pointer">
-              退出
-            </button>
           </div>
         </template>
       </div>
@@ -73,9 +66,11 @@ const props = defineProps({
   user: { type: Object, default: null },
   /** 首次拉取 /api/auth/me 完成前为 true */
   authChecking: { type: Boolean, default: false },
+  /** 为 true 时未登录不展示顶栏登录/注册（由父级跳转主站登录页） */
+  authRedirectGate: { type: Boolean, default: false },
 })
 
-defineEmits(['login', 'register', 'logout'])
+defineEmits(['login', 'register'])
 
 const displayName = computed(() => {
   const u = props.user || {}
@@ -87,7 +82,10 @@ const displayName = computed(() => {
 
 const safeCredits = computed(() => {
   const v = Number(props.user?.credits ?? 0)
-  if (Number.isNaN(v) || v < 0) return 0
-  return Math.floor(v)
+  if (!Number.isFinite(v) || v < 0) return '0'
+  const r = Math.round(v * 100) / 100
+  const s = r.toFixed(2)
+  // 主站为整数时去掉末尾 .00（如 1000）；有小数位则保留两位（如 973.97）
+  return s.endsWith('.00') ? String(Math.round(r)) : s
 })
 </script>

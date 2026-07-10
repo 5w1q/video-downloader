@@ -28,10 +28,11 @@ export function getDownloadUrl() {
 }
 
 export async function downloadViaServer(url, formatId) {
+  // 下载后可能提取字幕并用 AI 生成文件名，整体可能超过纯下载时间
   const response = await api.post(
     '/download',
     { url, format_id: formatId },
-    { responseType: 'blob', timeout: 600000 }
+    { responseType: 'blob', timeout: 900000 }
   )
   return response
 }

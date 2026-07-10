@@ -45,8 +45,10 @@ backend/secrets/*
 # 本地数据库（SQLite）
 backend/data/
 
-# 测试脚本
+# 测试脚本 / 冒烟产物（交付包不携带）
 backend/test_*.py
+backend/scripts/smoke_*.py
+docs/_smoke_*.log
 
 # 截图等非代码文件
 *.png

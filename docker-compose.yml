@@ -2,12 +2,37 @@ services:
   backend:
     build:
       context: ./backend
-      dockerfile: Dockerfile
+      # Docker Hub 不可达时用 Dockerfile.offline（基于本地 video-downloader-backend:base）
+      dockerfile: Dockerfile.offline
     env_file:
       - ./backend/.env
     environment:
       PERSIST_DOWNLOADS: "1"
       UVICORN_WORKERS: "2"
+      # ---- 完全本地运行（不依赖 Ab / 公网服务器）----
+      LOCAL_MODE: "1"
+      AB_BILLING_DISABLED: "1"
+      AB_USAGE_REPORT_ENABLED: "0"
+      DATABASE_URL: ""
+      # 当前镜像 curl_cffi 未提供 Edge-101；清空以免 parse/download 失败
+      YTDLP_IMPERSONATE: ""
+      # 勿指向已下线的生产域名（ASR 在 localhost 本身也会禁用）
+      FRONTEND_URL: "http://localhost:8080"
+      PUBLIC_BASE_URL: "http://localhost:8080"
+      APP_PUBLIC_DOMAIN: "localhost"
+      CORS_ALLOWED_ORIGINS: "http://localhost:8080,http://127.0.0.1:8080,http://localhost:5173"
+      ALIYUN_ASR_ENABLED: "0"
+      YTDLP_COOKIEFILE: "/app/secrets/bilibili_cookies.txt"
+      # 本机 Clash Verge（当前 mixed 口 7897）；容器经 host-gateway 访问宿主机代理
+      # Clash 需开启「允许局域网连接 / Allow LAN」，否则容器连不上 127.0.0.1 上的代理
+      HTTP_PROXY: "http://host.docker.internal:7897"
+      HTTPS_PROXY: "http://host.docker.internal:7897"
+      NO_PROXY: "localhost,127.0.0.1,backend,web"
+      http_proxy: "http://host.docker.internal:7897"
+      https_proxy: "http://host.docker.internal:7897"
+      no_proxy: "localhost,127.0.0.1,backend,web"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     command: >
       sh -c "uvicorn main:app --host 0.0.0.0 --port 8001 --workers ${UVICORN_WORKERS:-2}"
     ports:
@@ -16,14 +41,15 @@ services:
     volumes:
       - ./backend/downloads:/app/downloads
       - ./backend/data:/app/data
-      # B 站 412：在 backend/.env 设置 YTDLP_COOKIEFILE=/app/secrets/bilibili_cookies.txt，并将 cookies 放入 ./backend/secrets/
+      # B 站 412：cookies 放 ./backend/secrets/bilibili_cookies.txt
       - ./backend/secrets:/app/secrets:ro
     restart: unless-stopped
 
   web:
     build:
       context: ./frontend
-      dockerfile: Dockerfile
+      # 离线：先在宿主机执行 set VITE_AB_LOGIN_SKIP=1 && npm run build，再 build 本服务
+      dockerfile: Dockerfile.offline
     ports:
       - "8080:80"
     depends_on:

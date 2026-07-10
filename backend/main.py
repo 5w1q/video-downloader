@@ -14,11 +14,13 @@ from pydantic import BaseModel
 
 from downloader import VideoDownloader
 from douyin import DouyinParser, is_douyin_url, normalize_media_url
+from tiktok import TikTokParser, is_tiktok_url
 from database import init_db, get_db_backend
 
 
 downloader = VideoDownloader()
 douyin_parser = DouyinParser(download_dir=downloader.DOWNLOAD_DIR)
+tiktok_parser = TikTokParser(download_dir=downloader.DOWNLOAD_DIR)
 
 
 @asynccontextmanager
@@ -75,11 +77,40 @@ class DownloadRequest(BaseModel):
     return_json: bool = False
 
 
+def _build_info() -> dict:
+    """发布核对用：优先读环境变量（镜像构建注入），否则尝试本机 git。"""
+    sha = (os.getenv("GIT_SHA") or os.getenv("SOURCE_COMMIT") or "").strip()
+    build_time = (os.getenv("BUILD_TIME") or "").strip()
+    if not sha:
+        try:
+            import subprocess
+
+            sha = (
+                subprocess.check_output(
+                    ["git", "rev-parse", "--short", "HEAD"],
+                    cwd=os.path.dirname(os.path.abspath(__file__)),
+                    stderr=subprocess.DEVNULL,
+                    timeout=2,
+                )
+                .decode("utf-8", errors="replace")
+                .strip()
+            )
+        except Exception:
+            sha = "unknown"
+    return {
+        "git_sha": sha or "unknown",
+        "build_time": build_time or None,
+        "local_mode": (os.getenv("LOCAL_MODE") or "").strip().lower()
+        in ("1", "true", "yes", "on"),
+    }
+
+
 @app.get("/api/health")
 async def health_check():
     return {
         "status": "ok",
         "message": "万能视频下载器服务运行中",
+        "build": _build_info(),
         "infra": {
             "db_backend": get_db_backend(),
             "domain": os.getenv("APP_PUBLIC_DOMAIN", "video.sayhi-ab.asia"),
@@ -89,12 +120,14 @@ async def health_check():
 
 @app.post("/api/parse")
 async def parse_video(req: ParseRequest):
-    """解析视频信息（抖音走专用模块，其他走 yt-dlp）"""
+    """解析视频信息（抖音 / TikTok 走专用模块，其他走 yt-dlp）"""
     try:
         loop = asyncio.get_event_loop()
         url = normalize_media_url(req.url)
         if is_douyin_url(url):
             result = await loop.run_in_executor(None, douyin_parser.parse, url)
+        elif is_tiktok_url(url):
+            result = await loop.run_in_executor(None, tiktok_parser.parse, url)
         else:
             result = await loop.run_in_executor(None, downloader.parse_video, url)
         return {"success": True, "data": result}
@@ -107,12 +140,14 @@ async def parse_video(req: ParseRequest):
 
 @app.post("/api/download")
 async def download_video(req: DownloadRequest):
-    """服务端下载视频后提供文件下载（抖音走专用模块）"""
+    """服务端下载视频后提供文件下载（抖音 / TikTok 走专用模块）"""
     try:
         loop = asyncio.get_event_loop()
         url = normalize_media_url(req.url)
         if is_douyin_url(url):
             result = await loop.run_in_executor(None, douyin_parser.download, url)
+        elif is_tiktok_url(url):
+            result = await loop.run_in_executor(None, tiktok_parser.download, url)
         else:
             result = await loop.run_in_executor(
                 None, downloader.download_video, url, req.format_id
@@ -170,6 +205,8 @@ async def proxy_thumbnail(url: str = Query(..., description="缩略图URL")):
         # 抖音图床校验 Referer；用图片 URL 自身作 Referer 常被拒
         if "douyinpic.com" in host or "douyin.com" in host or "douyin.cn" in host or "iesdouyin.com" in host:
             referer = "https://www.douyin.com/"
+        elif "tiktokcdn" in host or "tiktok.com" in host or "ttwstatic.com" in host:
+            referer = "https://www.tiktok.com/"
         else:
             referer = target
         async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
@@ -194,12 +231,18 @@ from api_summarize import router as summarize_router
 from api_auth import router as auth_router
 from api_payment import router as payment_router
 from api_bulk_download import router as bulk_download_router
+from api_youtube_search import router as youtube_search_router
+from api_x_search import router as x_search_router
+from api_instagram_search import router as instagram_search_router
 from api_asr_pull import router as asr_pull_router
 
 app.include_router(summarize_router)
 app.include_router(auth_router)
 app.include_router(payment_router)
 app.include_router(bulk_download_router)
+app.include_router(youtube_search_router)
+app.include_router(x_search_router)
+app.include_router(instagram_search_router)
 app.include_router(asr_pull_router)
 
 

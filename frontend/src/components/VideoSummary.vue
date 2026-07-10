@@ -61,10 +61,16 @@
 
           <!-- 字幕文本 Tab -->
           <div v-show="activeTab === 'subtitle'">
-            <div v-if="subtitleData.segments && subtitleData.segments.length > 0">
+            <div v-if="subtitleListSegments.length > 0">
+              <p
+                v-if="subtitleSourceHint"
+                class="mb-3 text-xs text-amber-900 bg-amber-50 border border-amber-100 rounded-lg px-3 py-2 leading-relaxed"
+              >
+                {{ subtitleSourceHint }}
+              </p>
               <div class="flex items-center justify-between mb-4">
                 <div class="text-sm text-text-secondary">
-                  共 {{ subtitleData.segments.length }} 条字幕
+                  共 {{ subtitleListSegments.length }} 条字幕
                   <span v-if="subtitleData.language" class="ml-2 px-2 py-0.5 bg-primary-light text-primary rounded-full text-xs">
                     {{ subtitleData.subtitle_type === 'manual' ? '人工字幕' : '自动字幕' }} · {{ subtitleData.language }}
                   </span>
@@ -111,7 +117,7 @@
                 :class="['space-y-1 overflow-y-auto', subtitleExpanded ? 'max-h-none' : 'max-h-[500px]']"
               >
                 <div
-                  v-for="(seg, idx) in subtitleData.segments"
+                  v-for="(seg, idx) in subtitleListSegments"
                   :key="idx"
                   class="flex gap-3 py-2 px-3 rounded-lg hover:bg-bg-section transition-colors group"
                 >
@@ -280,7 +286,7 @@
 </template>
 
 <script setup>
-import { ref, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { marked } from 'marked'
 import { Transformer } from 'markmap-lib'
 import { Markmap } from 'markmap-view'
@@ -292,7 +298,7 @@ const props = defineProps({
   user: { type: Object, default: null },
   summarizeTrigger: { type: Number, default: 0 },
 })
-const emit = defineEmits(['loading-change', 'need-login', 'show-pricing'])
+const emit = defineEmits(['loading-change', 'need-login', 'show-pricing', 'wallet-sync'])
 
 const tabs = [
   { key: 'summary', label: '总结摘要', icon: '📝' },
@@ -306,7 +312,43 @@ const loading = ref(false)
 const loadingMessage = ref('正在提取视频字幕...')
 
 const summaryText = ref('')
-const subtitleData = ref({ segments: [], has_subtitle: false })
+const subtitleData = ref({
+  segments: [],
+  has_subtitle: false,
+  full_text: '',
+  language: '',
+  subtitle_type: 'none',
+})
+
+/** 列表展示用：有分条用 segments；仅有 full_text 时也合成一条，避免界面空白 */
+const subtitleListSegments = computed(() => {
+  const d = subtitleData.value || {}
+  const segs = Array.isArray(d.segments) ? d.segments : []
+  if (segs.length > 0) return segs
+  const ft = String(d.full_text || '').trim()
+  if (!ft) return []
+  return [{ start: 0, end: 0, text: ft }]
+})
+
+/** 抖音等仅有简介文案、无逐句字幕时的说明 */
+const subtitleSourceHint = computed(() => {
+  const d = subtitleData.value || {}
+  const segs = Array.isArray(d.segments) ? d.segments : []
+  const ft = String(d.full_text || '').trim()
+  if (!d.has_subtitle || !ft) return ''
+  if (segs.length === 0) {
+    return '平台未返回分条字幕，以下为合并全文（可能与标题/简介相同）。'
+  }
+  if (
+    segs.length === 1
+    && Number(segs[0].start || 0) === 0
+    && Number(segs[0].end || 0) === 0
+    && d.subtitle_type === 'auto'
+  ) {
+    return '当前无独立字幕轨道，以下为视频文案/简介，常用于 AI 总结；与左侧标题相近属正常现象。'
+  }
+  return ''
+})
 const subtitleExpanded = ref(false)
 const mindmapMarkdown = ref('')
 const mindmapSvg = ref(null)
@@ -374,7 +416,15 @@ async function startSummarize() {
       },
       subtitle: (data) => {
         try {
-          subtitleData.value = JSON.parse(data)
+          const raw = JSON.parse(data)
+          const segs = Array.isArray(raw.segments) ? raw.segments : []
+          subtitleData.value = {
+            has_subtitle: !!raw.has_subtitle,
+            language: raw.language || '',
+            subtitle_type: raw.subtitle_type || 'none',
+            segments: segs,
+            full_text: typeof raw.full_text === 'string' ? raw.full_text : '',
+          }
           if (subtitleData.value.has_subtitle) {
             loadingMessage.value = 'AI 正在分析视频内容...'
           }
@@ -389,11 +439,33 @@ async function startSummarize() {
           mindmapMarkdown.value = parsed.markdown || ''
         } catch (e) { /* ignore parse error */ }
       },
+      wallet: (data) => {
+        try {
+          const o = JSON.parse(data)
+          const bal = o?.credits_balance
+          if (bal != null && bal !== '') {
+            const n = Number(bal)
+            if (Number.isFinite(n)) {
+              emit('wallet-sync', { credits: Math.round(n * 10000) / 10000 })
+            }
+          }
+        } catch { /* ignore */ }
+      },
       quota: (data) => {
-        try { quotaInfo.value = JSON.parse(data) } catch {}
+        try {
+          quotaInfo.value = JSON.parse(data)
+          const bal = quotaInfo.value?.credits_balance
+          if (bal != null && bal !== '') {
+            const n = Number(bal)
+            if (Number.isFinite(n)) {
+              emit('wallet-sync', { credits: Math.round(n * 10000) / 10000 })
+            }
+          }
+        } catch {}
       },
       done: () => {
         loading.value = false
+        emit('wallet-sync')
       },
       error: (data) => {
         loading.value = false
@@ -424,7 +496,13 @@ watch(
     loading.value = false
     loadingMessage.value = '正在提取视频字幕...'
     summaryText.value = ''
-    subtitleData.value = { segments: [], has_subtitle: false }
+    subtitleData.value = {
+      segments: [],
+      has_subtitle: false,
+      full_text: '',
+      language: '',
+      subtitle_type: 'none',
+    }
     subtitleExpanded.value = false
     mindmapMarkdown.value = ''
     quotaInfo.value = null
@@ -668,7 +746,7 @@ function downloadMindmapSvg() {
 // ===== 字幕文件下载 =====
 function downloadSubtitle(format) {
   showSubtitleDropdown.value = false
-  const segments = subtitleData.value.segments
+  const segments = subtitleListSegments.value
   if (!segments || segments.length === 0) return
 
   let content = ''

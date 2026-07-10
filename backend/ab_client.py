@@ -1,3 +1,4 @@
+import logging
 import os
 import uuid
 from datetime import datetime, timezone
@@ -5,6 +6,8 @@ from urllib.parse import quote, urlparse
 
 import httpx
 from fastapi import HTTPException, Request
+
+logger = logging.getLogger(__name__)
 
 
 def _env_truthy(name: str, default: str = "0") -> bool:
@@ -14,12 +17,25 @@ def _env_truthy(name: str, default: str = "0") -> bool:
 def _billing_enabled() -> bool:
     """
     是否启用 Ab 主站计费检查。
-    默认启用；本地独立运行可在 backend/.env 设 AB_BILLING_DISABLED=1 关闭。
+    默认启用；本地独立运行可设 AB_BILLING_DISABLED=1，或 LOCAL_MODE=1（自动关闭计费）。
     """
+    if _env_truthy("LOCAL_MODE", "0"):
+        return False
     return not _env_truthy("AB_BILLING_DISABLED", "0")
 
 
+def _billing_refund_enabled() -> bool:
+    """任务失败是否调用主站 refund-consume。默认开启；设 AB_BILLING_REFUND_DISABLED=1 关闭。"""
+    return not _env_truthy("AB_BILLING_REFUND_DISABLED", "0")
+
+
+def _billing_refund_secret() -> str:
+    return (os.getenv("AB_BILLING_REFUND_SECRET") or "").strip()
+
+
 def _usage_reporting_enabled() -> bool:
+    if _env_truthy("LOCAL_MODE", "0"):
+        return False
     return _env_truthy("AB_USAGE_REPORT_ENABLED", "1")
 
 
@@ -44,6 +60,16 @@ def _ab_timeout_sec() -> float:
         return max(3.0, float(os.getenv("AB_TIMEOUT_SEC", "20")))
     except ValueError:
         return 20.0
+
+
+def _parse_summary_credits(raw) -> float:
+    """主站 /api/account/summary 的 credits；兼容数字或字符串。"""
+    if raw is None or raw == "":
+        return 0.0
+    try:
+        return round(float(raw), 4)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _cookie_header_from_request(request: Request) -> str:
@@ -77,7 +103,11 @@ def build_ab_login_url(next_url: str = "/", mode: str = "login") -> str:
     return f"{base}{login_path}?next={quote(safe_next, safe='/%?=&')}{mode_q}"
 
 
-def _action_cost(action: str) -> int | None:
+def _action_cost(action: str) -> float | None:
+    """
+    从环境变量读取本次动作的积分扣费（元口径，可为小数如 0.29）；未设置时返回 None。
+    try-consume 实际传的单价由 try_consume_from_request 收敛（总结有兜底，其余默认为 0）。
+    """
     key_map = {
         "download": "AB_CREDITS_COST_DOWNLOAD",
         "summarize": "AB_CREDITS_COST_SUMMARIZE",
@@ -91,9 +121,29 @@ def _action_cost(action: str) -> int | None:
     if raw == "":
         return None
     try:
-        return max(0, int(raw))
+        v = float(raw)
     except ValueError:
         return None
+    if v < 0:
+        return None
+    return round(v, 4)
+
+
+# AI 总结：env 未配置 AB_CREDITS_COST_SUMMARIZE 时的兜底单价（元）。批量/普通下载不走 try-consume。
+_TRY_CONSUME_SUMMARIZE_FALLBACK = 0.29
+
+
+def make_action_idempotency_key(action: str) -> str:
+    """生成 try-consume / refund-consume 共用的幂等键。"""
+    return f"{_ab_app_id()}:{action}:{uuid.uuid4().hex}"
+
+
+def consume_refundable(consume: dict | None) -> bool:
+    """扣费已成功且主站侧可返还（积分或免费试次）。"""
+    if not consume or not consume.get("allowed"):
+        return False
+    mode = consume.get("mode") or ""
+    return mode in ("credits", "free_trial")
 
 
 async def _ab_get(path: str, cookie_header: str) -> dict:
@@ -133,7 +183,7 @@ async def get_ab_user_from_request(request: Request) -> dict:
         "display_name": user.get("display_name") or "",
         "is_vip": bool(summary_data.get("is_member")),
         "membership_until": summary_data.get("membership_until"),
-        "credits": int(summary_data.get("credits") or 0),
+        "credits": _parse_summary_credits(summary_data.get("credits")),
     }
 
 
@@ -141,7 +191,7 @@ async def try_consume_from_request(
     request: Request,
     action: str,
     idempotency_key: str | None = None,
-    credits_cost: int | None = None,
+    credits_cost: float | None = None,
 ) -> dict:
     if not _billing_enabled():
         return {
@@ -157,14 +207,18 @@ async def try_consume_from_request(
 
     app_id = _ab_app_id()
     idem = idempotency_key or f"{app_id}:{action}:{uuid.uuid4().hex}"
-    cost = _action_cost(action) if credits_cost is None else credits_cost
+    cost = credits_cost if credits_cost is not None else _action_cost(action)
+    if action == "summarize":
+        if cost is None:
+            cost = _TRY_CONSUME_SUMMARIZE_FALLBACK
+    elif cost is None:
+        cost = 0.0
 
     payload = {
         "app_id": app_id,
         "idempotency_key": idem,
+        "credits_cost": float(cost),
     }
-    if cost is not None:
-        payload["credits_cost"] = int(cost)
 
     async with httpx.AsyncClient(timeout=_ab_timeout_sec()) as client:
         res = await client.post(
@@ -183,7 +237,73 @@ async def try_consume_from_request(
     if not res.is_success:
         msg = data.get("error") if isinstance(data, dict) else None
         raise HTTPException(status_code=502, detail=msg or "主站扣费服务不可用")
-    return data if isinstance(data, dict) else {}
+    out = data if isinstance(data, dict) else {}
+    out["idempotency_key"] = idem
+    return out
+
+
+async def refund_consume_from_request(
+    request: Request,
+    idempotency_key: str,
+    *,
+    reason: str = "summarize_failed",
+    user_id: int | None = None,
+) -> dict:
+    """
+    任务失败时返还积分或免费试次（幂等）。
+    默认用用户 Cookie 调主站；若配置 AB_BILLING_REFUND_SECRET 且传入 user_id 则走内网密钥。
+    """
+    if not _billing_enabled() or not _billing_refund_enabled():
+        return {"ok": True, "refunded": False, "mode": "billing_disabled"}
+
+    app_id = _ab_app_id()
+    refund_reason = (reason or "summarize_failed").strip()[:120] or "summarize_failed"
+    payload = {
+        "app_id": app_id,
+        "idempotency_key": idempotency_key,
+        "reason": refund_reason,
+    }
+    headers = {"Content-Type": "application/json", "Accept": "application/json"}
+
+    secret = _billing_refund_secret()
+    if secret and user_id is not None and int(user_id) > 0:
+        headers["X-Ab-Billing-Refund-Secret"] = secret
+        payload["user_id"] = int(user_id)
+    else:
+        cookie_header = _cookie_header_from_request(request)
+        if not cookie_header:
+            logger.warning("refund-consume skipped: no cookie and no refund secret")
+            return {"ok": False, "refunded": False, "mode": "no_auth"}
+        headers["Cookie"] = cookie_header
+
+    url = f"{_ab_base_url()}/api/account/refund-consume"
+    try:
+        async with httpx.AsyncClient(timeout=_ab_timeout_sec()) as client:
+            res = await client.post(url, json=payload, headers=headers)
+    except httpx.HTTPError as e:
+        logger.warning("refund-consume request failed: %s", e)
+        return {"ok": False, "refunded": False, "mode": "request_failed"}
+
+    try:
+        data = res.json()
+    except Exception:
+        data = {}
+
+    if not res.is_success:
+        msg = data.get("error") if isinstance(data, dict) else None
+        logger.warning(
+            "refund-consume HTTP %s idem=%s body=%s",
+            res.status_code,
+            idempotency_key,
+            (res.text or "")[:300],
+        )
+        return {
+            "ok": False,
+            "refunded": False,
+            "mode": "http_error",
+            "error": msg or f"HTTP {res.status_code}",
+        }
+    return data if isinstance(data, dict) else {"ok": True, "refunded": False}
 
 
 async def proxy_ab_logout(request: Request) -> None:

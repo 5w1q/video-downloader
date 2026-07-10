@@ -7,18 +7,57 @@ from typing import Any, Optional
 _BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
+def _resolve_cookiefile_path(raw: str) -> Optional[str]:
+    """解析 cookie 文件路径；只读卷则复制到临时可写文件供 yt-dlp 回写。"""
+    path = os.path.expanduser((raw or "").strip())
+    if not path:
+        return None
+    if not os.path.isabs(path):
+        path = os.path.normpath(os.path.join(_BACKEND_DIR, path))
+    if not os.path.isfile(path):
+        return None
+    if os.access(path, os.W_OK):
+        return path
+    try:
+        import tempfile
+
+        fd, tmp = tempfile.mkstemp(prefix="ytdlp_cookies_", suffix=".txt")
+        os.close(fd)
+        shutil.copy2(path, tmp)
+        return tmp
+    except OSError:
+        return path
+
+
 def _cookiefile_from_env() -> Optional[str]:
-    """Netscape 格式 cookies.txt；用于云服务器上 B 站等站点的 412/风控缓解。"""
+    """Netscape 格式 cookies.txt；用于云服务器上 B 站等站点的 412/风控缓解。
+
+    secrets 常以只读卷挂载；yt-dlp 可能回写 cookiefile，故只读时复制到可写临时文件。
+    """
     for key in ("YTDLP_COOKIEFILE", "BILIBILI_COOKIEFILE"):
         raw = (os.getenv(key) or "").strip()
         if not raw:
             continue
-        path = os.path.expanduser(raw)
-        if not os.path.isabs(path):
-            path = os.path.normpath(os.path.join(_BACKEND_DIR, path))
-        if os.path.isfile(path):
+        path = _resolve_cookiefile_path(raw)
+        if path:
             return path
     return None
+
+
+def _js_runtimes_from_env() -> dict[str, Any]:
+    """YouTube n-challenge 需要 JS runtime + yt-dlp-ejs。默认启用 node。
+
+    YTDLP_JS_RUNTIMES=node|deno|node,deno；设 0/off 关闭。
+    """
+    raw = (os.getenv("YTDLP_JS_RUNTIMES") or "node").strip()
+    if raw.lower() in ("0", "off", "false", "none", ""):
+        return {}
+    runtimes: dict[str, dict] = {}
+    for part in raw.split(","):
+        name = part.strip().lower()
+        if name in ("node", "deno", "bun"):
+            runtimes[name] = {}
+    return {"js_runtimes": runtimes} if runtimes else {}
 
 
 def _cookies_from_browser_from_env() -> Optional[tuple]:
@@ -69,22 +108,151 @@ def _http_headers_for_url(url: str) -> dict[str, str]:
     }
     if "bilibili.com" in u or "b23.tv" in u:
         headers["Referer"] = "https://www.bilibili.com/"
+    elif "instagram.com" in u or "cdninstagram.com" in u or "fbcdn.net" in u:
+        headers["Referer"] = "https://www.instagram.com/"
     return headers
+
+
+def _is_youtube_url(url: str) -> bool:
+    u = (url or "").lower()
+    return any(
+        x in u
+        for x in (
+            "youtube.com",
+            "youtu.be",
+            "youtube-nocookie.com",
+            "music.youtube.com",
+        )
+    ) or u.startswith("ytsearch")
+
+
+def _is_instagram_url(url: str) -> bool:
+    u = (url or "").lower()
+    return "instagram.com" in u or "instagr.am" in u
+
+
+def _is_bilibili_url(url: str) -> bool:
+    u = (url or "").lower()
+    return "bilibili.com" in u or "b23.tv" in u
+
+
+def _is_tiktok_url(url: str) -> bool:
+    u = (url or "").lower()
+    return any(
+        x in u
+        for x in (
+            "tiktok.com",
+            "tiktokv.com",
+            "vm.tiktok.com",
+            "vt.tiktok.com",
+        )
+    )
 
 
 def _ytdlp_base_opts(url: str) -> dict[str, Any]:
     opts: dict[str, Any] = {"http_headers": _http_headers_for_url(url)}
+    # 无 JS runtime 时 web 客户端常只剩 storyboard；android 仍可拿到可播格式。
+    # 注意：带 cookiefile 时 yt-dlp 会跳过 android，故 YouTube 不用全局 B 站 cookies，
+    # 并必须启用 js_runtimes（node/deno）+ yt-dlp-ejs 解 n-challenge。
+    if _is_youtube_url(url):
+        opts["extractor_args"] = {
+            "youtube": {
+                "player_client": ["android", "web"],
+            }
+        }
+        opts.update(_js_runtimes_from_env())
+        # YouTube 可选单独 Cookie（勿复用 bilibili_cookies.txt）
+        yt_cookie = (os.getenv("YOUTUBE_COOKIEFILE") or "").strip()
+        if yt_cookie:
+            path = _resolve_cookiefile_path(yt_cookie)
+            if path:
+                opts["cookiefile"] = path
+                return opts
+        # 无独立 cookie 文件时，可回退浏览器 Cookie（本地调试 / 生产需自行导出文件）
+        cfb = _cookies_from_browser_from_env()
+        if cfb:
+            opts["cookiesfrombrowser"] = cfb
+            return opts
+        imp = _impersonate_from_env()
+        if imp:
+            opts["impersonate"] = imp
+        return opts
+
+    # Instagram：登录态 Cookie 常必需（empty media response）；勿复用 B 站 cookies
+    if _is_instagram_url(url):
+        ig_cookie = (os.getenv("INSTAGRAM_COOKIEFILE") or "").strip()
+        if ig_cookie:
+            path = _resolve_cookiefile_path(ig_cookie)
+            if path:
+                opts["cookiefile"] = path
+                return opts
+        cfb = _cookies_from_browser_from_env()
+        if cfb:
+            opts["cookiesfrombrowser"] = cfb
+            return opts
+        imp = _impersonate_from_env()
+        if imp:
+            opts["impersonate"] = imp
+        return opts
+
+    # TikTok：HK/受限出口常被重定向到 /hk/about；勿套用含 tiktok 域的 B 站 cookies
+    if _is_tiktok_url(url):
+        tt_cookie = (os.getenv("TIKTOK_COOKIEFILE") or "").strip()
+        if tt_cookie:
+            path = _resolve_cookiefile_path(tt_cookie)
+            if path:
+                opts["cookiefile"] = path
+        imp = _impersonate_from_env()
+        if imp:
+            opts["impersonate"] = imp
+        return opts
+
     imp = _impersonate_from_env()
     if imp:
         opts["impersonate"] = imp
-    cf = _cookiefile_from_env()
-    if cf:
-        opts["cookiefile"] = cf
-        return opts
+    # 全局 YTDLP_COOKIEFILE 主要用于 B 站 412；勿套到已单独处理的站点
+    if _is_bilibili_url(url):
+        cf = _cookiefile_from_env()
+        if cf:
+            opts["cookiefile"] = cf
+            return opts
+    else:
+        # 其它站点：仅在未配置专用 cookie 时可选浏览器 Cookie
+        pass
     cfb = _cookies_from_browser_from_env()
     if cfb:
         opts["cookiesfrombrowser"] = cfb
+        return opts
+    if not _is_bilibili_url(url):
+        cf = _cookiefile_from_env()
+        if cf:
+            opts["cookiefile"] = cf
     return opts
+
+
+def _format_candidates(format_id: str, *, has_ffmpeg: bool) -> list[str]:
+    """生成格式回退链，缓解 YouTube「Requested format is not available」。"""
+    primary = (format_id or "").strip() or "bestvideo+bestaudio/best"
+    if not has_ffmpeg and "+" in primary:
+        primary = "best"
+    seen: set[str] = set()
+    out: list[str] = []
+    for cand in (
+        primary,
+        "bestvideo*+bestaudio/best",
+        "best[ext=mp4]/best",
+        "18/22/best",
+        "best",
+        "worst",
+    ):
+        c = (cand or "").strip()
+        if not c or c in seen:
+            continue
+        if not has_ffmpeg and "+" in c:
+            continue
+        seen.add(c)
+        out.append(c)
+    return out
 
 
 def _parse_socket_timeout() -> float:
@@ -95,6 +263,47 @@ def _parse_socket_timeout() -> float:
         return max(5.0, min(120.0, float(raw)))
     except ValueError:
         return 30.0
+
+
+def _parse_download_retries() -> int:
+    raw = (os.getenv("YTDLP_DOWNLOAD_RETRIES") or "").strip()
+    if not raw:
+        return 5
+    try:
+        return max(1, min(20, int(raw)))
+    except ValueError:
+        return 5
+
+
+def _parse_fragment_retries() -> int:
+    raw = (os.getenv("YTDLP_FRAGMENT_RETRIES") or "").strip()
+    if not raw:
+        return 5
+    try:
+        return max(1, min(20, int(raw)))
+    except ValueError:
+        return 5
+
+
+def _is_transient_download_error(exc: BaseException) -> bool:
+    """代理断开 / SSL EOF 等瞬时网络错误，适合整次下载重试。"""
+    msg = str(exc).lower()
+    needles = (
+        "unexpected_eof_while_reading",
+        "eof occurred in violation of protocol",
+        "unable to connect to proxy",
+        "remote end closed connection",
+        "remotedisconnected",
+        "connection reset",
+        "connection aborted",
+        "timed out",
+        "timeout",
+        "temporary failure in name resolution",
+        "network is unreachable",
+        "ssl: unexpected_eof",
+        "ssleoferror",
+    )
+    return any(n in msg for n in needles)
 
 
 def _find_ffmpeg_path() -> Optional[str]:
@@ -121,7 +330,12 @@ class VideoDownloader:
 
     @staticmethod
     def _sanitize_filename(name: str) -> str:
-        return re.sub(r'[\\/*?:"<>|]', "_", name)
+        # Windows 非法字符 + NBSP/控制符；避免 Facebook 等长标题直接写入 outtmpl 失败
+        cleaned = (name or "video").replace("\xa0", " ").replace("\u3000", " ")
+        cleaned = re.sub(r'[\x00-\x1f\x7f]', "", cleaned)
+        cleaned = re.sub(r'[\\/*?:"<>|]', "_", cleaned)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip(" .")
+        return (cleaned[:180] or "video")
 
     @staticmethod
     def _format_filesize(size: Optional[int]) -> str:
@@ -266,30 +480,65 @@ class VideoDownloader:
 
     def download_video(self, url: str, format_id: str, out_dir: Optional[str] = None) -> dict:
         """下载视频到服务器目录，返回文件路径和元数据。out_dir 为空时使用默认 DOWNLOAD_DIR。"""
+        import time
+
         target_dir = out_dir if out_dir else self.DOWNLOAD_DIR
         os.makedirs(target_dir, exist_ok=True)
 
-        if not self.has_ffmpeg and "+" in format_id:
-            format_id = "best"
+        last_err: Optional[Exception] = None
+        info = None
+        prepared_path = ""
+        dl_retries = _parse_download_retries()
+        frag_retries = _parse_fragment_retries()
+        # 整次下载外层重试：覆盖代理断开 / SSL EOF（yt-dlp 内部 retries 有时不够）
+        attempt_max = max(1, min(5, int(os.getenv("YTDLP_DOWNLOAD_ATTEMPTS", "3") or "3")))
 
-        ydl_opts = {
-            **_ytdlp_base_opts(url),
-            "format": format_id,
-            "outtmpl": os.path.join(target_dir, "%(title)s.%(ext)s"),
-            "quiet": True,
-            "no_warnings": True,
-            "noplaylist": True,
-        }
-
-        if self.has_ffmpeg:
-            ydl_opts["ffmpeg_location"] = self.ffmpeg_path
-            ydl_opts["merge_output_format"] = "mp4"
-
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
+        for attempt in range(1, attempt_max + 1):
+            info = None
+            prepared_path = ""
+            for fmt in _format_candidates(format_id, has_ffmpeg=self.has_ffmpeg):
+                ydl_opts = {
+                    **_ytdlp_base_opts(url),
+                    "format": fmt,
+                    # 先用 id 落盘，避免 title 含 Windows 非法字符导致 Errno 22
+                    "outtmpl": os.path.join(target_dir, "%(id)s.%(ext)s"),
+                    "windowsfilenames": True,
+                    "quiet": True,
+                    "no_warnings": True,
+                    "noplaylist": True,
+                    "socket_timeout": max(30.0, _parse_socket_timeout()),
+                    "retries": dl_retries,
+                    "fragment_retries": frag_retries,
+                    "extractor_retries": max(3, dl_retries),
+                    "file_access_retries": 3,
+                }
+                if self.has_ffmpeg:
+                    ydl_opts["ffmpeg_location"] = self.ffmpeg_path
+                    ydl_opts["merge_output_format"] = "mp4"
+                try:
+                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                        info = ydl.extract_info(url, download=True)
+                        if info:
+                            prepared_path = ydl.prepare_filename(info)
+                    if info:
+                        break
+                except Exception as e:
+                    last_err = e
+                    msg = str(e).lower()
+                    if "requested format is not available" in msg or "only images are available" in msg:
+                        continue
+                    if _is_transient_download_error(e) and attempt < attempt_max:
+                        break
+                    raise
+            if info:
+                break
+            if last_err and _is_transient_download_error(last_err) and attempt < attempt_max:
+                time.sleep(min(2 ** attempt, 15))
+                continue
+            break
 
         if not info:
-            raise ValueError("下载失败")
+            raise ValueError(str(last_err) if last_err else "下载失败")
 
         title = self._sanitize_filename(info.get("title", "video"))
         ext = info.get("ext", "mp4")
@@ -297,21 +546,34 @@ class VideoDownloader:
         filepath = os.path.join(target_dir, filename)
 
         if not os.path.exists(filepath):
-            prepared = ydl.prepare_filename(info)
-            if os.path.exists(prepared):
-                filepath = prepared
-                filename = os.path.basename(prepared)
+            if prepared_path and os.path.exists(prepared_path):
+                filepath = prepared_path
+                filename = os.path.basename(prepared_path)
             else:
                 for f in os.listdir(target_dir):
                     if title in f:
                         filepath = os.path.join(target_dir, f)
                         filename = f
                         break
+        platform_title = info.get("title", "video")
+        try:
+            from video_title import apply_content_filename, content_title_enabled
+
+            if content_title_enabled():
+                renamed = apply_content_filename(filepath, url, platform_title=platform_title)
+                return {
+                    "filepath": renamed["filepath"],
+                    "filename": renamed["filename"],
+                    "title": renamed["title"],
+                    "ext": renamed["ext"],
+                }
+        except Exception:
+            pass
 
         return {
             "filepath": filepath,
             "filename": filename,
-            "title": info.get("title", "video"),
+            "title": platform_title,
             "ext": ext,
         }
 

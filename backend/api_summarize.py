@@ -10,19 +10,64 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.sse import EventSourceResponse, ServerSentEvent
 from pydantic import BaseModel
 
-from ab_client import try_consume_from_request
+from ab_client import (
+    consume_refundable,
+    make_action_idempotency_key,
+    refund_consume_from_request,
+    try_consume_from_request,
+)
 from auth import get_optional_user
 from summarizer import summarize_llm_configured
 
 router = APIRouter(prefix="/api", tags=["AI 总结"])
 
 # 字幕提取（含 yt-dlp / 阿里云转写）可能很慢；超时与心跳避免前端长期无响应
+
+
+def _sse_credits_balance(v) -> float | None:
+    try:
+        return round(float(v), 4)
+    except (TypeError, ValueError):
+        return None
+
+
 def _summarize_extract_timeout_sec() -> float:
     return float(os.getenv("SUMMARIZE_EXTRACT_TIMEOUT_SEC", "1200"))
 
 
 def _summarize_extract_heartbeat_sec() -> float:
     return float(os.getenv("SUMMARIZE_EXTRACT_HEARTBEAT_SEC", "12"))
+
+
+async def _refund_summarize_billing(
+    request: Request,
+    idempotency_key: str,
+    *,
+    reason: str,
+    user_id: int | None = None,
+) -> dict:
+    """扣费后业务失败时返还；失败不影响向用户展示错误。"""
+    try:
+        return await refund_consume_from_request(
+            request,
+            idempotency_key,
+            reason=reason,
+            user_id=user_id,
+        )
+    except Exception:
+        return {"ok": False, "refunded": False}
+
+
+def _error_event_payload(message: str, refund_data: dict | None = None, **extra) -> dict:
+    payload = {"message": message, **extra}
+    if refund_data and refund_data.get("refunded"):
+        payload["refunded"] = True
+        bal = refund_data.get("credits_balance")
+        if bal is not None:
+            b = _sse_credits_balance(bal)
+            if b is not None:
+                payload["credits_balance"] = b
+    return payload
 
 
 class SummarizeRequest(BaseModel):
@@ -57,13 +102,13 @@ def _get_extractor():
 
 @router.post("/summarize", response_class=EventSourceResponse)
 async def summarize_video(
+    request: Request,
     req: SummarizeRequest,
     user: dict | None = Depends(get_optional_user),
-    request: Request = None,
 ) -> AsyncIterable[ServerSentEvent]:
     """
     AI 视频总结（SSE 流式）
-    事件类型: progress / subtitle / summary / mindmap / done / error / quota
+    事件类型: progress / subtitle / wallet / summary / mindmap / done / error / quota
     """
     if not user:
         yield ServerSentEvent(
@@ -78,6 +123,11 @@ async def summarize_video(
             event="error",
         )
         return
+
+    consume_idem: str | None = None
+    consume: dict | None = None
+    billing_charged = False
+    user_id = user.get("id")
 
     try:
         loop = asyncio.get_running_loop()
@@ -156,9 +206,37 @@ async def summarize_video(
             )
             return
 
-        consume = await try_consume_from_request(request, action="summarize")
+        # SSE 已开始下发 progress/subtitle；此处必须用事件收尾，禁止 raise HTTPException，
+        # 否则上游 chunked 流中途断开，Nginx 常见表现为 502 Bad Gateway。
+        consume_idem = make_action_idempotency_key("summarize")
+        try:
+            consume = await try_consume_from_request(
+                request,
+                action="summarize",
+                idempotency_key=consume_idem,
+            )
+        except HTTPException as he:
+            detail = he.detail
+            msg = detail if isinstance(detail, str) else str(detail)
+            yield ServerSentEvent(
+                raw_data=json.dumps(
+                    {
+                        "message": msg,
+                        "need_login": he.status_code == 401,
+                    },
+                    ensure_ascii=False,
+                ),
+                event="error",
+            )
+            return
+
         if not consume.get("ok", False):
-            raise HTTPException(status_code=502, detail="主站计费服务异常")
+            yield ServerSentEvent(
+                raw_data=json.dumps({"message": "主站计费服务异常"}, ensure_ascii=False),
+                event="error",
+            )
+            return
+
         if not consume.get("allowed", False):
             reason = consume.get("reason")
             msg = consume.get("message") or ("需要开通会员" if reason == "need_membership" else "积分不足")
@@ -174,6 +252,18 @@ async def summarize_video(
                 event="error",
             )
             return
+
+        billing_charged = consume_refundable(consume)
+
+        # 扣费成功后立刻推送余额，不必等整段总结流结束（否则用户误以为未扣分）
+        _wb = consume.get("credits_balance")
+        if _wb is not None:
+            bal = _sse_credits_balance(_wb)
+            if bal is not None:
+                yield ServerSentEvent(
+                    raw_data=json.dumps({"credits_balance": bal}, ensure_ascii=False),
+                    event="wallet",
+                )
 
         full_text = subtitle_data["full_text"]
         summarizer = _get_summarizer()
@@ -196,6 +286,12 @@ async def summarize_video(
             quota_info = {"remaining": remaining, "limit": limit}
         else:
             quota_info = {"remaining": -1, "limit": -1}
+        # 主站 try-consume 在 allowed 时会带回 credits_balance；供前端等客户端与扣费后余额对齐
+        cb = consume.get("credits_balance")
+        if cb is not None:
+            bal = _sse_credits_balance(cb)
+            if bal is not None:
+                quota_info["credits_balance"] = bal
         yield ServerSentEvent(
             raw_data=json.dumps(quota_info, ensure_ascii=False),
             event="quota",
@@ -203,9 +299,38 @@ async def summarize_video(
 
         yield ServerSentEvent(raw_data="[DONE]", event="done")
 
+    except asyncio.CancelledError:
+        refund_data = None
+        if billing_charged and consume_idem:
+            refund_data = await _refund_summarize_billing(
+                request,
+                consume_idem,
+                reason="summarize_cancelled",
+                user_id=user_id,
+            )
+        if refund_data and refund_data.get("refunded") and refund_data.get("credits_balance") is not None:
+            bal = _sse_credits_balance(refund_data["credits_balance"])
+            if bal is not None:
+                yield ServerSentEvent(
+                    raw_data=json.dumps({"credits_balance": bal}, ensure_ascii=False),
+                    event="wallet",
+                )
+        raise
+
     except Exception as e:
+        refund_data = None
+        if billing_charged and consume_idem:
+            refund_data = await _refund_summarize_billing(
+                request,
+                consume_idem,
+                reason=str(e)[:120] or "summarize_failed",
+                user_id=user_id,
+            )
         yield ServerSentEvent(
-            raw_data=json.dumps({"message": f"总结失败: {str(e)}"}, ensure_ascii=False),
+            raw_data=json.dumps(
+                _error_event_payload(f"总结失败: {str(e)}", refund_data),
+                ensure_ascii=False,
+            ),
             event="error",
         )
 

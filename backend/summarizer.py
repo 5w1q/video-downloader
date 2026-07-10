@@ -1,12 +1,13 @@
 """AI 视频总结模块：字幕提取 + 大模型总结/问答（DeepSeek 或阿里云 DashScope 兼容 OpenAI）
 
-字幕来源（与 https://github.com/yt-dlp/yt-dlp 思路对齐，由 SubtitleExtractor 编排）：
+字幕提取优先级（``SubtitleExtractor.extract``，由 ``SubtitleExtractor`` 编排）：
 
-1. **平台字幕 API** — B 站 ``dm/view`` + 字幕 JSON；抖音 ``DouyinParser`` 元数据里的字幕链与 desc 等。
-2. **yt-dlp** — ``extract_info(..., download=False)`` 且 ``writesubtitles`` / ``writeautomaticsub``，
-   读取 ``info['subtitles']``、``info['automatic_captions']`` 直链或必要时 ``download`` 写 VTT；
-   等价于命令行 ``yt-dlp --skip-download --write-subs --write-auto-subs`` 的数据面。
-3. **阿里云 Paraformer** — 无可用字幕后 ``try_paraformer_transcribe``（需 ``DASHSCOPE_API_KEY`` 与公网 ``PUBLIC_BASE_URL``）。
+1. **各站平台字幕** — B 站 ``dm/view``；抖音 ``subtitle_infos`` 字幕 URL（不走 yt-dlp）。
+2. **yt-dlp** — ``info['subtitles']`` / ``automatic_captions``（抖音默认仅用专用解析；可设 ``DOUYIN_TRY_YTDLP_SUBTITLES=1`` 再试 yt-dlp）。
+3. **阿里云 Paraformer 语音转写** — 上述均无真实字幕时调用 ``try_paraformer_transcribe``；若为抖音 ``desc``、Twitter 元数据等**弱占位**，仍会尝试 Paraformer，失败则保留占位文案。
+   （需 ``DASHSCOPE_API_KEY`` 与公网 ``PUBLIC_BASE_URL``；**非 OpenAI Whisper**。）
+
+参见：https://github.com/yt-dlp/yt-dlp 字幕元数据思路。
 """
 
 import json
@@ -21,6 +22,9 @@ from openai import OpenAI
 
 from douyin import DEFAULT_HEADERS, DouyinParser, is_douyin_url, normalize_media_url
 from downloader import _ytdlp_base_opts
+
+# 占位字幕（常为单条 0:00）：extract() 仍会尝试 Paraformer；真实字幕响应不设 subtitle_source 或为 *_platform
+_WEAK_SUBTITLE_SOURCES = frozenset({"douyin_desc_placeholder", "twitter_metadata_placeholder"})
 
 
 def _env_truthy(name: str) -> bool:
@@ -40,7 +44,7 @@ class SubtitleExtractor:
     """
     从页面 URL 取结构化字幕文本。
 
-    优先级概览：各站 **平台 API / 专用解析** → **yt-dlp 字幕元数据** →（在 ``extract`` 外层）**阿里云语音转写**。
+    优先级概览：各站 **平台 API / 专用解析** → **yt-dlp 字幕元数据** → **阿里云 Paraformer**（含：抖音仅 desc 占位时仍会尝试转写）。
     yt-dlp 侧依赖其各 extractor 填充的 ``subtitles`` / ``automatic_captions``（见项目 README 中字幕相关选项）。
     """
 
@@ -49,7 +53,7 @@ class SubtitleExtractor:
 
     def extract(self, url: str) -> dict:
         """
-        提取视频字幕；平台字幕与 yt-dlp 均无结果时，可选使用阿里云 Paraformer 语音转写（见 aliyun_asr）。
+        提取视频字幕；无真实字幕或仅为弱占位（抖音 desc、Twitter 摘要）时，尝试阿里云 Paraformer（见 aliyun_asr）。
         """
         try:
             out = self._extract_inner(url)
@@ -61,7 +65,8 @@ class SubtitleExtractor:
                 "segments": [],
                 "full_text": "",
             }
-        if out.get("has_subtitle"):
+        # 真实字幕轨不重跑 Paraformer；抖音 desc / Twitter 弱占位仍会尝试阿里云 Paraformer
+        if out.get("has_subtitle") and out.get("subtitle_source") not in _WEAK_SUBTITLE_SOURCES:
             return out
         try:
             from aliyun_asr import try_paraformer_transcribe
@@ -123,6 +128,7 @@ class SubtitleExtractor:
             if tw_fallback:
                 return {
                     "has_subtitle": True,
+                    "subtitle_source": "twitter_metadata_placeholder",
                     "language": "en",
                     "subtitle_type": "auto",
                     "segments": [{"start": 0.0, "end": 0.0, "text": tw_fallback}],
@@ -322,6 +328,7 @@ class SubtitleExtractor:
                     )
                     return {
                         "has_subtitle": True,
+                        "subtitle_source": "douyin_platform",
                         "language": lang,
                         "subtitle_type": "manual",
                         "segments": segments,
@@ -334,6 +341,8 @@ class SubtitleExtractor:
         if desc:
             return {
                 "has_subtitle": True,
+                # 标记为占位：外层 extract() 仍会尝试阿里云 Paraformer，成功则换成按句时间轴转写
+                "subtitle_source": "douyin_desc_placeholder",
                 "language": "zh",
                 "subtitle_type": "auto",
                 "segments": [{"start": 0.0, "end": 0.0, "text": desc}],
@@ -684,6 +693,33 @@ class VideoSummarizer:
         )
         return response.choices[0].message.content
 
+    def generate_short_title(self, subtitle_text: str, max_len: int = 30, language: str = "zh") -> str:
+        """根据字幕生成适合做文件名的短标题（非流式）。"""
+        prompt = self._build_short_title_prompt(subtitle_text, max_len, language)
+        response = self.client.chat.completions.create(
+            model=self.model,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "你是视频标题助手。只输出一条简短标题，不要解释、不要引号、不要标点装饰。"
+                    ),
+                },
+                {"role": "user", "content": prompt},
+            ],
+            stream=False,
+            temperature=0.4,
+            max_tokens=64,
+        )
+        text = (response.choices[0].message.content or "").strip()
+        # 模型偶发多行/带「标题：」前缀
+        text = text.splitlines()[0].strip()
+        text = re.sub(r"^(标题|题目|文件名)\s*[:：]\s*", "", text)
+        text = text.strip(" \"'`「」『』")
+        if len(text) > max_len:
+            text = text[:max_len]
+        return text
+
     def chat_stream(self, subtitle_text: str, question: str):
         """基于视频内容的 AI 问答，流式返回"""
         prompt = self._build_chat_prompt(subtitle_text, question)
@@ -739,6 +775,23 @@ class VideoSummarizer:
 5. 可以有第四层做更细的展开
 6. 每个节点的文字要简洁精炼
 7. 只输出 Markdown 内容，不要其他说明文字
+
+---
+视频字幕内容：
+{truncated}"""
+
+    @staticmethod
+    def _build_short_title_prompt(subtitle_text: str, max_len: int, language: str) -> str:
+        truncated = subtitle_text[:8000]
+        lang_hint = "中文" if language.startswith("zh") else "与原文相同的语言"
+        return f"""根据以下视频字幕，写一个能概括核心内容的短标题，用作下载文件名。
+
+硬性要求：
+1. 使用{lang_hint}
+2. 最多 {max_len} 个字符（含标点也算）
+3. 只输出标题本身，不要换行，不要「标题：」等前缀
+4. 不要使用 \\ / * ? : " < > | # @ 等文件名非法字符
+5. 不要用纯数字或无意义字母串；要能让人看懂视频在讲什么
 
 ---
 视频字幕内容：

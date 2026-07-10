@@ -1,0 +1,17 @@
+# 离线/Docker Hub 故障时：基于本地 backend 镜像刷新代码，并用国内 PyPI 源补齐依赖
+FROM video-downloader-backend:base
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir \
+    -i https://mirrors.aliyun.com/pypi/simple/ \
+    --trusted-host mirrors.aliyun.com \
+    -r requirements.txt
+
+COPY . .
+
+ENV PYTHONUNBUFFERED=1
+EXPOSE 8001
+
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8001"]

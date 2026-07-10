@@ -1,0 +1,5 @@
+# 离线重建：宿主机先 npm run build（需 VITE_AB_LOGIN_SKIP=1），再叠到本地 web 镜像
+FROM video-downloader-web:base
+COPY dist /usr/share/nginx/html
+COPY nginx.conf /etc/nginx/conf.d/default.conf
+EXPOSE 80

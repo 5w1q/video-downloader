@@ -27,10 +27,11 @@ function parseSseDataBlocks(buffer, onDataObj) {
  * @param {boolean} [options.verifyFile=true] 为 true 时仅当服务器上仍存在同名文件才跳过
  * @param {string} [options.formatId]
  * @param {number} [options.delaySeconds=2]
- * @param {string} [options.downloadDir] 服务端保存目录；留空且 packForBrowser 时用临时目录并打包 ZIP
- * @param {boolean} [options.packForBrowser=true] 留空保存目录时完成后下载 ZIP 到本机（服务端 Docker 勿填 Windows 盘符）
+ * @param {string} [options.downloadDir]
+ * @param {boolean} [options.packForBrowser=false]
+ * @param {boolean} [options.deliverFiles=true]
  * @param {AbortSignal} [options.signal]
- * @param {(obj: object) => void} options.onEvent 每条 SSE JSON（event: start|item|done|error）
+ * @param {(obj: object) => void} options.onEvent
  */
 export async function bulkDownloadStream(file, options = {}) {
   const {
@@ -39,7 +40,8 @@ export async function bulkDownloadStream(file, options = {}) {
     formatId = 'bestvideo+bestaudio/best',
     delaySeconds = 2,
     downloadDir = '',
-    packForBrowser = true,
+    packForBrowser = false,
+    deliverFiles = true,
     onEvent = () => {},
     signal,
   } = options
@@ -52,6 +54,7 @@ export async function bulkDownloadStream(file, options = {}) {
   form.append('delay_seconds', String(delaySeconds))
   form.append('download_dir', typeof downloadDir === 'string' ? downloadDir : '')
   form.append('pack_for_browser', packForBrowser ? 'true' : 'false')
+  form.append('deliver_files', deliverFiles ? 'true' : 'false')
 
   const res = await fetch('/api/bulk-download', {
     method: 'POST',
@@ -62,6 +65,77 @@ export async function bulkDownloadStream(file, options = {}) {
   if (!res.ok) {
     const text = await res.text()
     throw new Error(text || `HTTP ${res.status}`)
+  }
+
+  const reader = res.body?.getReader()
+  if (!reader) {
+    throw new Error('无法读取响应流')
+  }
+
+  const decoder = new TextDecoder()
+  let buffer = ''
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      buffer = parseSseDataBlocks(buffer, onEvent)
+    }
+  } catch (e) {
+    if (signal?.aborted) return
+    throw e
+  }
+  if (buffer.trim()) {
+    parseSseDataBlocks(buffer + '\n\n', onEvent)
+  }
+}
+
+/**
+ * 按 URL 列表批量下载（SSE），用于预览结果后直接下载。
+ * @param {string[]} urls
+ * @param {object} options
+ */
+export async function bulkDownloadUrlsStream(urls, options = {}) {
+  const {
+    skipCompleted = true,
+    verifyFile = true,
+    formatId = 'bestvideo+bestaudio/best',
+    delaySeconds = 2,
+    downloadDir = '',
+    packForBrowser = false,
+    deliverFiles = true,
+    sourceName = 'preview',
+    onEvent = () => {},
+    signal,
+  } = options
+
+  const res = await fetch('/api/bulk-download/urls', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      urls,
+      skip_completed: skipCompleted,
+      verify_file: verifyFile,
+      format_id: formatId,
+      delay_seconds: delaySeconds,
+      download_dir: typeof downloadDir === 'string' ? downloadDir : '',
+      pack_for_browser: packForBrowser,
+      deliver_files: deliverFiles,
+      source_name: sourceName,
+    }),
+    signal,
+  })
+
+  if (!res.ok) {
+    let detail = ''
+    try {
+      const j = await res.json()
+      detail = j.detail || j.message || ''
+    } catch {
+      detail = await res.text()
+    }
+    throw new Error(detail || `HTTP ${res.status}`)
   }
 
   const reader = res.body?.getReader()
