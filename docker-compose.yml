@@ -21,7 +21,8 @@ services:
       PUBLIC_BASE_URL: "http://localhost:8080"
       APP_PUBLIC_DOMAIN: "localhost"
       CORS_ALLOWED_ORIGINS: "http://localhost:8080,http://127.0.0.1:8080,http://localhost:5173"
-      ALIYUN_ASR_ENABLED: "0"
+      ALIYUN_ASR_ENABLED: "1"
+      # DASHSCOPE_API_KEY 由 backend/.env（env_file）注入；本机无公网域名时走本地 file:// ASR
       YTDLP_COOKIEFILE: "/app/secrets/bilibili_cookies.txt"
       # 本机 Clash Verge（当前 mixed 口 7897）；容器经 host-gateway 访问宿主机代理
       # Clash 需开启「允许局域网连接 / Allow LAN」，否则容器连不上 127.0.0.1 上的代理

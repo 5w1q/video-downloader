@@ -331,11 +331,19 @@ const subtitleListSegments = computed(() => {
 })
 
 /** 抖音等仅有简介文案、无逐句字幕时的说明 */
+const WEAK_SUBTITLE_SOURCES = new Set([
+  'douyin_desc_placeholder',
+  'twitter_metadata_placeholder',
+  'youtube_metadata_placeholder',
+])
 const subtitleSourceHint = computed(() => {
   const d = subtitleData.value || {}
   const segs = Array.isArray(d.segments) ? d.segments : []
   const ft = String(d.full_text || '').trim()
   if (!d.has_subtitle || !ft) return ''
+  if (WEAK_SUBTITLE_SOURCES.has(String(d.subtitle_source || ''))) {
+    return '当前无独立字幕轨道，以下为视频文案/简介，常用于 AI 总结；与左侧标题相近属正常现象。语音转写未成功时会出现此提示。'
+  }
   if (segs.length === 0) {
     return '平台未返回分条字幕，以下为合并全文（可能与标题/简介相同）。'
   }
@@ -344,6 +352,7 @@ const subtitleSourceHint = computed(() => {
     && Number(segs[0].start || 0) === 0
     && Number(segs[0].end || 0) === 0
     && d.subtitle_type === 'auto'
+    && d.subtitle_source !== 'aliyun_asr'
   ) {
     return '当前无独立字幕轨道，以下为视频文案/简介，常用于 AI 总结；与左侧标题相近属正常现象。'
   }

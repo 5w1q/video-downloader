@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 from api_bulk_download import resolve_bulk_output, sse_streaming_response
 from bulk_download_core import fmt_sse, run_bulk_download_stream
 from bulk_zip_tokens import sweep_expired_bulk_tokens
+from downloader import friendly_download_error
 from youtube_search import search_youtube
 
 router = APIRouter(prefix="/api", tags=["YouTube 搜索"])
@@ -48,7 +49,9 @@ async def youtube_search(body: YoutubeSearchRequest):
     except ValueError as e:
         from fastapi import HTTPException
 
-        raise HTTPException(status_code=400, detail=str(e)) from e
+        raise HTTPException(
+            status_code=400, detail=friendly_download_error(e)
+        ) from e
     return result
 
 
@@ -92,7 +95,7 @@ async def youtube_search_download(
         )
     except ValueError as e:
         async def err_stream() -> AsyncIterator[str]:
-            yield fmt_sse({"event": "error", "message": str(e)})
+            yield fmt_sse({"event": "error", "message": friendly_download_error(e)})
 
         return sse_streaming_response(err_stream())
 
@@ -123,13 +126,23 @@ async def youtube_search_download(
                 ),
             )
         except ValueError as e:
-            yield fmt_sse({"event": "error", "message": str(e)})
+            yield fmt_sse({"event": "error", "message": friendly_download_error(e)})
             return
         except Exception as e:
-            yield fmt_sse({"event": "error", "message": f"YouTube 搜索失败: {e}"})
+            yield fmt_sse(
+                {
+                    "event": "error",
+                    "message": friendly_download_error(f"YouTube 搜索失败: {e}"),
+                }
+            )
             return
 
-        urls = found.get("urls") or []
+        results = found.get("results") or []
+        urls = found.get("urls") or [r.get("url") for r in results if r.get("url")]
+        # 与 urls 同序的搜索标题，作统一命名回退（弱字幕时接近列表标题）
+        platform_titles: list[str] | None = None
+        if results and len(results) == len(urls):
+            platform_titles = [(r.get("title") or "").strip() for r in results]
         yield fmt_sse(
             {
                 "event": "search_done",
@@ -139,7 +152,7 @@ async def youtube_search_download(
                 "skipped_threshold": found.get("skipped_threshold", 0),
                 "min_views": min_views,
                 "min_likes": min_likes,
-                "results": found.get("results") or [],
+                "results": results,
                 "below_threshold_results": found.get("below_threshold_results") or [],
             }
         )
@@ -182,6 +195,7 @@ async def youtube_search_download(
                 "min_likes": min_likes,
             },
             deliver_files=do_deliver,
+            platform_titles=platform_titles,
         ):
             yield chunk
 

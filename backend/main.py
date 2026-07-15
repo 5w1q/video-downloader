@@ -12,7 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
-from downloader import VideoDownloader
+from downloader import VideoDownloader, friendly_download_error
 from douyin import DouyinParser, is_douyin_url, normalize_media_url
 from tiktok import TikTokParser, is_tiktok_url
 from database import init_db, get_db_backend
@@ -134,7 +134,7 @@ async def parse_video(req: ParseRequest):
     except Exception as e:
         raise HTTPException(status_code=400, detail={
             "success": False,
-            "error": f"解析失败: {str(e)}"
+            "error": f"解析失败: {friendly_download_error(e)}"
         })
 
 
@@ -175,7 +175,7 @@ async def download_video(req: DownloadRequest):
     except Exception as e:
         raise HTTPException(status_code=400, detail={
             "success": False,
-            "error": f"下载失败: {str(e)}"
+            "error": f"下载失败: {friendly_download_error(e)}"
         })
 
 
@@ -192,7 +192,7 @@ async def get_direct_url(req: DownloadRequest):
     except Exception as e:
         raise HTTPException(status_code=400, detail={
             "success": False,
-            "error": f"获取直链失败: {str(e)}"
+            "error": f"获取直链失败: {friendly_download_error(e)}"
         })
 
 

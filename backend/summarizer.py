@@ -24,7 +24,13 @@ from douyin import DEFAULT_HEADERS, DouyinParser, is_douyin_url, normalize_media
 from downloader import _ytdlp_base_opts
 
 # 占位字幕（常为单条 0:00）：extract() 仍会尝试 Paraformer；真实字幕响应不设 subtitle_source 或为 *_platform
-_WEAK_SUBTITLE_SOURCES = frozenset({"douyin_desc_placeholder", "twitter_metadata_placeholder"})
+_WEAK_SUBTITLE_SOURCES = frozenset(
+    {
+        "douyin_desc_placeholder",
+        "twitter_metadata_placeholder",
+        "youtube_metadata_placeholder",
+    }
+)
 
 
 def _env_truthy(name: str) -> bool:
@@ -38,6 +44,16 @@ def _is_bilibili_url(url: str) -> bool:
 def _is_twitter_or_x_url(url: str) -> bool:
     u = (url or "").lower()
     return "twitter.com" in u or "x.com" in u
+
+
+def _is_youtube_url(url: str) -> bool:
+    u = (url or "").lower()
+    return (
+        "youtube.com" in u
+        or "youtu.be" in u
+        or "youtube-nocookie.com" in u
+        or "music.youtube.com" in u
+    )
 
 
 class SubtitleExtractor:
@@ -133,6 +149,17 @@ class SubtitleExtractor:
                     "subtitle_type": "auto",
                     "segments": [{"start": 0.0, "end": 0.0, "text": tw_fallback}],
                     "full_text": tw_fallback,
+                }
+            # YouTube 无字幕轨时：用标题+简介作弱文本，供下载命名短标题（仍会尝试 Paraformer）
+            yt_fallback = self._youtube_text_fallback(info, url)
+            if yt_fallback:
+                return {
+                    "has_subtitle": True,
+                    "subtitle_source": "youtube_metadata_placeholder",
+                    "language": "zh",
+                    "subtitle_type": "auto",
+                    "segments": [{"start": 0.0, "end": 0.0, "text": yt_fallback}],
+                    "full_text": yt_fallback,
                 }
             return {
                 "has_subtitle": False,
@@ -418,6 +445,21 @@ class SubtitleExtractor:
             return ""
         return text
 
+    @staticmethod
+    def _youtube_text_fallback(info: dict, url: str) -> str:
+        if not _is_youtube_url(url):
+            return ""
+        parts: list[str] = []
+        for key in ("title", "fulltitle", "description"):
+            t = (info.get(key) or "").strip()
+            if t and t not in parts:
+                parts.append(t)
+        text = "\n\n".join(parts).strip()
+        # 有标题即可；简介可显著提升短标题质量
+        if not text:
+            return ""
+        return text[:8000]
+
     def _get_video_info(self, url: str) -> dict:
         ydl_opts = {
             **_ytdlp_base_opts(url),
@@ -702,7 +744,8 @@ class VideoSummarizer:
                 {
                     "role": "system",
                     "content": (
-                        "你是视频标题助手。只输出一条简短标题，不要解释、不要引号、不要标点装饰。"
+                        "你是视频标题助手。只输出一条简短标题，必须使用简体中文（不要繁体），"
+                        "不要解释、不要引号、不要标点装饰。"
                     ),
                 },
                 {"role": "user", "content": prompt},
@@ -783,7 +826,7 @@ class VideoSummarizer:
     @staticmethod
     def _build_short_title_prompt(subtitle_text: str, max_len: int, language: str) -> str:
         truncated = subtitle_text[:8000]
-        lang_hint = "中文" if language.startswith("zh") else "与原文相同的语言"
+        lang_hint = "简体中文（不要繁体）" if language.startswith("zh") else "与原文相同的语言"
         return f"""根据以下视频字幕，写一个能概括核心内容的短标题，用作下载文件名。
 
 硬性要求：

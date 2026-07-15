@@ -422,7 +422,9 @@ def _call_apify(query: str, number_of_tweets: int) -> list[dict[str, Any]]:
     except httpx.TimeoutException as e:
         raise ValueError("X 搜索超时（Apify Actor 未在时限内返回）") from e
     except httpx.HTTPError as e:
-        raise ValueError(f"X 搜索请求失败: {e}") from e
+        from downloader import friendly_download_error
+
+        raise ValueError(f"X 搜索请求失败: {friendly_download_error(e)}") from e
 
     if resp.status_code == 401:
         raise ValueError("APIFY_TOKEN 无效或已过期")

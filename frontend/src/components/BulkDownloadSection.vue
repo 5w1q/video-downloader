@@ -146,6 +146,7 @@
 <script setup>
 import { ref, computed, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import { bulkDownloadStream } from '../api/bulk.js'
+import { friendlyError } from '../api/friendlyError.js'
 
 defineProps({
   embedded: { type: Boolean, default: false },
@@ -263,7 +264,7 @@ function onDownloadZipPart(part) {
     const name = `batch-download-part${String(part.part).padStart(2, '0')}.zip`
     startBrowserZipDownload(part.url, name)
   } catch (e) {
-    pushLog(`分卷 ${part.part} 下载失败：${e.message || e}`)
+    pushLog(`分卷 ${part.part} 下载失败：${friendlyError(e)}`)
   }
 }
 
@@ -336,7 +337,7 @@ async function start() {
             pushLog(`[${data.index}/${data.total}] 成功 ${short} → ${data.filename || ''}`)
           } else if (data.status === 'fail') {
             failCount.value += 1
-            pushLog(`[${data.index}/${data.total}] 失败 ${short} — ${data.message || '未知错误'}`)
+            pushLog(`[${data.index}/${data.total}] 失败 ${short} — ${friendlyError(data.message || '未知错误')}`)
           }
         } else if (ev === 'done') {
           okCount.value = data.ok ?? okCount.value
@@ -351,7 +352,7 @@ async function start() {
             scrollToZipActions()
           }
         } else if (ev === 'error') {
-          pushLog(`错误：${data.message || '未知错误'}`)
+          pushLog(`错误：${friendlyError(data.message || '未知错误')}`)
         }
       },
     })
@@ -359,7 +360,7 @@ async function start() {
     if (e.name === 'AbortError') {
       pushLog('已取消（连接已断开，服务端可能仍在处理当前这一条）')
     } else {
-      pushLog(`请求异常：${e.message || e}`)
+      pushLog(`请求异常：${friendlyError(e)}`)
     }
   } finally {
     running.value = false

@@ -22,11 +22,25 @@ def content_title_enabled() -> bool:
     return v in ("1", "true", "yes", "on")
 
 
+def to_simplified_chinese(text: str) -> str:
+    """繁体中文转简体；无中文或转换失败时原样返回。"""
+    raw = text or ""
+    if not raw or not _HAS_CJK.search(raw):
+        return raw
+    try:
+        import zhconv
+
+        return zhconv.convert(raw, "zh-cn")
+    except Exception:
+        return raw
+
+
 def sanitize_download_basename(text: str, max_len: int = MAX_TITLE_LEN) -> str:
-    """清洗为安全文件名主干，截断到 max_len。"""
+    """清洗为安全文件名主干，截断到 max_len；含中文时统一为简体。"""
     raw = (text or "").strip()
     if not raw:
         return "video"
+    raw = to_simplified_chinese(raw)
     # 去掉首尾引号/书名号等装饰
     raw = raw.strip(" \"'`「」『』【】[]()（）")
     raw = raw.replace("\xa0", " ").replace("\u3000", " ")
@@ -65,9 +79,29 @@ def _fallback_from_text(text: str, platform_title: str) -> str:
     return sanitize_download_basename(platform_title or "video")
 
 
+def _llm_short_title(text: str) -> str:
+    """用 LLM 压成 ≤30 字短标题；失败返回空串。"""
+    text = (text or "").strip()
+    if not text:
+        return ""
+    try:
+        from summarizer import VideoSummarizer, summarize_llm_configured
+
+        if not summarize_llm_configured():
+            return ""
+        raw = VideoSummarizer().generate_short_title(text, max_len=MAX_TITLE_LEN)
+        safe = sanitize_download_basename(raw)
+        if safe and safe != "video":
+            return safe
+    except Exception:
+        pass
+    return ""
+
+
 def generate_download_title(url: str, platform_title: str = "") -> str:
     """
     根据字幕/转写内容生成最多 30 字标题；失败则回退平台标题（同样截断）。
+    无字幕但已配置 LLM 时，仍用平台标题走一遍短标题总结，避免长期停留在裸 ID。
     """
     platform_title = (platform_title or "").strip()
     if not content_title_enabled():
@@ -75,20 +109,25 @@ def generate_download_title(url: str, platform_title: str = "") -> str:
 
     content = ""
     try:
-        from summarizer import SubtitleExtractor, VideoSummarizer, summarize_llm_configured
+        from summarizer import SubtitleExtractor
 
         sub = SubtitleExtractor().extract(url)
         content = (sub.get("full_text") or "").strip()
-        if content and summarize_llm_configured():
-            raw = VideoSummarizer().generate_short_title(content, max_len=MAX_TITLE_LEN)
-            safe = sanitize_download_basename(raw)
-            if safe and safe != "video":
-                return safe
+        if content:
+            short = _llm_short_title(content)
+            if short:
+                return short
     except Exception:
         pass
 
     if content:
         return _fallback_from_text(content, platform_title)
+
+    # 无字幕：对平台标题做 LLM 短标题（YouTube 搜索标题 / X 推文截断等）
+    if platform_title:
+        short = _llm_short_title(platform_title)
+        if short:
+            return short
     return sanitize_download_basename(platform_title or "video")
 
 

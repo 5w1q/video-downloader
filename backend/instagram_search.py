@@ -1,4 +1,4 @@
-"""Instagram Reels 关键词搜索 + 互动/日期筛选（基于 ScrapeCreators）。"""
+"""Instagram Reels 关键词搜索 + 互动/日期筛选（基于 Apify）。"""
 
 from __future__ import annotations
 
@@ -6,20 +6,13 @@ import os
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
-from urllib.parse import urlencode
+from urllib.parse import quote
 
 import httpx
 
 _TITLE_MAX = 120
-_API_URL = "https://api.scrapecreators.com/v2/instagram/reels/search"
-
-# 前端 date_filter → ScrapeCreators date_posted
-_DATE_POSTED_MAP = {
-    "today": "last-day",
-    "week": "last-week",
-    "month": "last-month",
-    "year": "last-year",
-}
+_DEFAULT_ACTOR = "data-slayer/instagram-search-reels"
+_APIFY_BASE = "https://api.apify.com/v2"
 
 
 def _env_int(name: str, default: int, lo: int, hi: int) -> int:
@@ -40,8 +33,21 @@ def _default_search_pool() -> int:
     return _env_int("INSTAGRAM_SEARCH_POOL", 40, 1, 50)
 
 
-def _api_key() -> str:
-    return (os.getenv("SCRAPECREATORS_API_KEY") or "").strip()
+def _apify_token() -> str:
+    return (os.getenv("APIFY_TOKEN") or "").strip()
+
+
+def _actor_id() -> str:
+    raw = (os.getenv("INSTAGRAM_SEARCH_ACTOR_ID") or _DEFAULT_ACTOR).strip()
+    return raw or _DEFAULT_ACTOR
+
+
+def _actor_path_id(actor_id: str) -> str:
+    """Apify URL 中 username/name 用 ~ 连接。"""
+    s = (actor_id or "").strip()
+    if "/" in s and "~" not in s:
+        return s.replace("/", "~", 1)
+    return s
 
 
 def _as_int(v: Any) -> Optional[int]:
@@ -74,6 +80,11 @@ def _parse_filter_date(raw: Optional[str]) -> Optional[str]:
     return digits
 
 
+def _add_days_yyyymmdd(d: str, days: int) -> str:
+    dt = datetime.strptime(d, "%Y%m%d") + timedelta(days=days)
+    return dt.strftime("%Y%m%d")
+
+
 def _normalize_upload_date(raw: Any) -> str:
     """统一为 YYYYMMDD；无法解析则返回空串。"""
     if raw is None:
@@ -97,6 +108,8 @@ def _normalize_upload_date(raw: Any) -> str:
         except ValueError:
             pass
     for fmt in (
+        "%Y-%m-%dT%H:%M:%S.%f%z",
+        "%Y-%m-%dT%H:%M:%S%z",
         "%Y-%m-%dT%H:%M:%S.%fZ",
         "%Y-%m-%dT%H:%M:%SZ",
         "%Y-%m-%d %H:%M:%S",
@@ -119,10 +132,59 @@ def _normalize_upload_date(raw: Any) -> str:
         return ""
 
 
-def map_date_posted(date_filter: str) -> Optional[str]:
-    """前端 date_filter → API date_posted；all/date 不传。"""
+def _resolve_date_bounds(
+    date_filter: str,
+    upload_date: Optional[str],
+) -> tuple[Optional[str], Optional[str], Optional[str]]:
+    """返回 (since_yyyymmdd, until_yyyymmdd_exclusive, exact_yyyymmdd)。
+
+    until 为 exclusive；指定单日时 since=until-1day 的 exact。
+    """
     mode = (date_filter or "all").strip().lower()
-    return _DATE_POSTED_MAP.get(mode)
+    if mode not in ("all", "today", "week", "month", "year", "date"):
+        mode = "all"
+
+    today = _today_yyyymmdd()
+    if mode == "all":
+        return None, None, None
+    if mode == "today":
+        return today, _add_days_yyyymmdd(today, 1), today
+    if mode == "week":
+        return _add_days_yyyymmdd(today, -7), _add_days_yyyymmdd(today, 1), None
+    if mode == "month":
+        return _add_days_yyyymmdd(today, -30), _add_days_yyyymmdd(today, 1), None
+    if mode == "year":
+        return _add_days_yyyymmdd(today, -365), _add_days_yyyymmdd(today, 1), None
+    # date
+    target = _parse_filter_date(upload_date)
+    if not target:
+        raise ValueError("请选择筛选日期")
+    return target, _add_days_yyyymmdd(target, 1), target
+
+
+def _in_date_range(
+    upload_date: str,
+    *,
+    since: Optional[str],
+    until_excl: Optional[str],
+    exact: Optional[str],
+    mode: str,
+) -> bool:
+    """本地日期过滤。缺日期：today/date 严格丢弃；相对档保留（与旧行为接近）。"""
+    if exact:
+        if not upload_date:
+            return False
+        return upload_date == exact
+    if since is None and until_excl is None:
+        return True
+    if not upload_date:
+        # 相对档无 taken_at 时保留，避免索引缺字段导致全空
+        return mode in ("week", "month", "year")
+    if since and upload_date < since:
+        return False
+    if until_excl and upload_date >= until_excl:
+        return False
+    return True
 
 
 def _truncate_title(text: str) -> str:
@@ -139,7 +201,7 @@ def _reel_id(item: dict[str, Any]) -> str:
         v = item.get(key)
         if v is not None and str(v).strip():
             return str(v).strip()
-    sc = (item.get("shortcode") or item.get("code") or "").strip()
+    sc = (item.get("code") or item.get("shortcode") or "").strip()
     return sc
 
 
@@ -147,14 +209,14 @@ def _reel_url(item: dict[str, Any]) -> str:
     url = (item.get("url") or item.get("permalink") or "").strip()
     if url.startswith("http"):
         return url
-    sc = (item.get("shortcode") or item.get("code") or "").strip()
+    sc = (item.get("code") or item.get("shortcode") or "").strip()
     if sc:
         return f"https://www.instagram.com/reel/{sc}/"
     return ""
 
 
 def _uploader(item: dict[str, Any]) -> str:
-    owner = item.get("owner") or item.get("user") or {}
+    owner = item.get("user") or item.get("owner") or {}
     if isinstance(owner, dict):
         return (
             owner.get("username")
@@ -166,7 +228,7 @@ def _uploader(item: dict[str, Any]) -> str:
 
 
 def _thumbnail(item: dict[str, Any]) -> str:
-    for key in ("thumbnail_src", "display_url", "thumbnail", "thumbnail_url"):
+    for key in ("thumbnail_url", "thumbnail_src", "display_url", "thumbnail"):
         v = item.get(key)
         if isinstance(v, str) and v.startswith("http"):
             return v
@@ -194,6 +256,13 @@ def _duration(item: dict[str, Any]) -> tuple[Any, str]:
         return None, ""
 
 
+def _caption_text(item: dict[str, Any]) -> str:
+    caption = item.get("caption") or item.get("title") or ""
+    if isinstance(caption, dict):
+        return str(caption.get("text") or "")
+    return str(caption or "")
+
+
 def normalize_reel(item: dict[str, Any]) -> Optional[dict[str, Any]]:
     if not isinstance(item, dict):
         return None
@@ -203,19 +272,22 @@ def normalize_reel(item: dict[str, Any]) -> Optional[dict[str, Any]]:
         return None
 
     rid = _reel_id(item)
-    caption = item.get("caption") or item.get("title") or ""
-    if isinstance(caption, dict):
-        caption = caption.get("text") or ""
+    caption = _caption_text(item)
 
     likes = _as_int(item.get("like_count") or item.get("likes"))
     comments = _as_int(item.get("comment_count") or item.get("comments_count"))
     views = _as_int(
-        item.get("video_play_count")
+        item.get("ig_play_count")
+        if item.get("ig_play_count") is not None
+        else item.get("play_count")
+        if item.get("play_count") is not None
+        else item.get("video_play_count")
         if item.get("video_play_count") is not None
-        else item.get("video_view_count") or item.get("view_count") or item.get("play_count")
+        else item.get("video_view_count") or item.get("view_count")
     )
     upload_date = _normalize_upload_date(
-        item.get("taken_at")
+        item.get("taken_at_date")
+        or item.get("taken_at")
         or item.get("taken_at_timestamp")
         or item.get("timestamp")
         or item.get("created_at")
@@ -231,7 +303,7 @@ def normalize_reel(item: dict[str, Any]) -> Optional[dict[str, Any]]:
 
     return {
         "id": rid,
-        "title": _truncate_title(str(caption)),
+        "title": _truncate_title(caption),
         "url": url,
         "video_url": video_url,
         "uploader": _uploader(item),
@@ -278,87 +350,66 @@ def _passes_thresholds(
     return True
 
 
-def _call_scrapecreators(
-    query: str,
-    *,
-    date_posted: Optional[str] = None,
-    page: int = 1,
-) -> list[dict[str, Any]]:
-    key = _api_key()
-    if not key:
+def _pool_to_max_pages(pool: int) -> int:
+    """Actor 按页翻；约估每页十余条，上限 5 页控制费用。"""
+    p = max(1, int(pool or 1))
+    return max(1, min(5, (p + 11) // 12))
+
+
+def _call_apify(query: str, max_pages: int) -> list[dict[str, Any]]:
+    token = _apify_token()
+    if not token:
         raise ValueError(
-            "未配置 SCRAPECREATORS_API_KEY。请在 backend/.env 中设置后重启后端。"
+            "未配置 APIFY_TOKEN。请在 backend/.env 中设置后重启后端。"
         )
 
-    params: dict[str, Any] = {"query": query, "page": max(1, int(page or 1))}
-    if date_posted:
-        params["date_posted"] = date_posted
+    actor = _actor_path_id(_actor_id())
+    url = (
+        f"{_APIFY_BASE}/acts/{quote(actor, safe='~')}"
+        f"/run-sync-get-dataset-items"
+        f"?token={quote(token)}"
+    )
+    payload = {
+        "query": query,
+        "maxPages": max(1, min(100, int(max_pages or 1))),
+    }
+    timeout = httpx.Timeout(connect=30.0, read=300.0, write=30.0, pool=30.0)
+    try:
+        with httpx.Client(timeout=timeout) as client:
+            resp = client.post(url, json=payload)
+    except httpx.TimeoutException as e:
+        raise ValueError("Instagram 搜索超时（Apify Actor 未在时限内返回）") from e
+    except httpx.HTTPError as e:
+        from downloader import friendly_download_error
 
-    url = f"{_API_URL}?{urlencode(params)}"
-    timeout = httpx.Timeout(connect=30.0, read=120.0, write=30.0, pool=30.0)
-    last_err: Optional[Exception] = None
-    resp: Optional[httpx.Response] = None
-    # 偶发 SSL EOF / 断连：轻量重试
-    for attempt in range(3):
-        try:
-            with httpx.Client(timeout=timeout) as client:
-                resp = client.get(url, headers={"x-api-key": key})
-            break
-        except httpx.TimeoutException as e:
-            raise ValueError("Instagram 搜索超时（ScrapeCreators 未在时限内返回）") from e
-        except httpx.HTTPError as e:
-            last_err = e
-            if attempt >= 2:
-                raise ValueError(f"Instagram 搜索请求失败: {e}") from e
-    if resp is None:
-        raise ValueError(f"Instagram 搜索请求失败: {last_err}")
+        raise ValueError(
+            f"Instagram 搜索请求失败: {friendly_download_error(e)}"
+        ) from e
 
-    if resp.status_code == 401 or resp.status_code == 403:
-        raise ValueError("SCRAPECREATORS_API_KEY 无效或已过期")
+    if resp.status_code == 401:
+        raise ValueError("APIFY_TOKEN 无效或已过期")
     if resp.status_code == 402:
-        raise ValueError("ScrapeCreators 额度不足，请充值后重试")
+        raise ValueError("Apify 额度不足，请充值后重试")
     if resp.status_code >= 400:
         detail = (resp.text or "")[:400]
-        raise ValueError(f"ScrapeCreators 失败 (HTTP {resp.status_code}): {detail}")
+        raise ValueError(f"Apify Actor 失败 (HTTP {resp.status_code}): {detail}")
 
     try:
         data = resp.json()
     except Exception as e:
-        raise ValueError("ScrapeCreators 返回了无法解析的响应") from e
+        raise ValueError("Apify 返回了无法解析的响应") from e
 
     if isinstance(data, dict):
-        if data.get("success") is False:
-            err = data.get("error") or data.get("message") or "未知错误"
-            raise ValueError(f"ScrapeCreators 错误: {err}")
-        items = data.get("reels") or data.get("items") or data.get("data") or []
+        err = data.get("error") or data.get("message")
+        if err and "items" not in data:
+            raise ValueError(f"Apify 错误: {err}")
+        items = data.get("items") or data.get("data") or []
         if isinstance(items, list):
             return [x for x in items if isinstance(x, dict)]
         return []
     if isinstance(data, list):
         return [x for x in data if isinstance(x, dict)]
     return []
-
-
-def _fetch_pool(
-    query: str,
-    *,
-    date_posted: Optional[str],
-    pool: int,
-) -> list[dict[str, Any]]:
-    """按页拉取，直到凑够 pool 或无更多结果。"""
-    collected: list[dict[str, Any]] = []
-    page = 1
-    max_pages = 5
-    while len(collected) < pool and page <= max_pages:
-        batch = _call_scrapecreators(query, date_posted=date_posted, page=page)
-        if not batch:
-            break
-        collected.extend(batch)
-        if len(batch) < 5:
-            # 本页很少，多半没有下一页
-            break
-        page += 1
-    return collected[: max(pool, len(collected))]
 
 
 def search_instagram(
@@ -386,19 +437,11 @@ def search_instagram(
     if mode not in ("all", "today", "week", "month", "year", "date"):
         mode = "all"
 
-    target_date: Optional[str] = None
-    date_posted = map_date_posted(mode)
-    if mode == "date":
-        target_date = _parse_filter_date(upload_date)
-        if not target_date:
-            raise ValueError("请选择筛选日期")
-        # 指定单日：不传 date_posted（或用 last-year 扩大召回），本地按 taken_at 滤
-        date_posted = None
-    elif mode == "today":
-        target_date = _today_yyyymmdd()
+    since_d, until_d, exact_date = _resolve_date_bounds(mode, upload_date)
+    target_date = exact_date
 
     if search_pool is None:
-        if min_likes > 0 or min_comments > 0 or min_views > 0 or target_date or mode in (
+        if min_likes > 0 or min_comments > 0 or min_views > 0 or since_d or mode in (
             "week",
             "month",
             "year",
@@ -410,7 +453,10 @@ def search_instagram(
         pool = max(1, min(int(search_pool), 50))
     pool = max(pool, max_results)
 
-    raw_items = _fetch_pool(q, date_posted=date_posted, pool=pool)
+    max_pages = _pool_to_max_pages(pool)
+    raw_items = _call_apify(q, max_pages)
+    if len(raw_items) > pool:
+        raw_items = raw_items[:pool]
 
     matched: list[dict[str, Any]] = []
     below: list[dict[str, Any]] = []
@@ -430,15 +476,12 @@ def search_instagram(
 
         scanned += 1
 
-        if target_date:
-            ud = item.get("upload_date") or ""
-            if ud and ud != target_date:
-                skipped_date += 1
-                continue
-            # today 档：API 已用 last-day；无日期的条目仍保留（索引结果可能缺 taken_at）
-            if mode == "date" and not ud:
-                skipped_date += 1
-                continue
+        ud = item.get("upload_date") or ""
+        if not _in_date_range(
+            ud, since=since_d, until_excl=until_d, exact=exact_date, mode=mode
+        ):
+            skipped_date += 1
+            continue
 
         likes = item.get("like_count")
         comments = item.get("comment_count")
@@ -466,13 +509,16 @@ def search_instagram(
 
     if scanned == 0 and not matched and not below:
         raise ValueError(
-            "Instagram 搜索无结果（索引召回弱于 YouTube，可放宽关键词/日期后重试）"
+            "Instagram 搜索无结果（可放宽关键词/日期后重试）"
         )
 
     return {
         "query": q,
-        "date_posted": date_posted or "",
+        "date_posted": "",
         "platform": "instagram",
+        "provider": "apify",
+        "actor_id": _actor_id(),
+        "max_pages": max_pages,
         "max_results": max_results,
         "min_likes": min_likes,
         "min_comments": min_comments,

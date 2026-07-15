@@ -143,8 +143,18 @@ class DouyinParser:
         item_info = self._fetch_item_info(video_id, resolved_url)
         return self._build_result(item_info, video_id)
 
-    def download(self, url: str, mode: str = "video", out_dir: Optional[str | Path] = None) -> dict:
-        """下载抖音视频，返回文件路径。out_dir 为空时使用实例初始化时的 download_dir。"""
+    def download(
+        self,
+        url: str,
+        mode: str = "video",
+        out_dir: Optional[str | Path] = None,
+        *,
+        platform_title: Optional[str] = None,
+    ) -> dict:
+        """下载抖音视频，返回文件路径。out_dir 为空时使用实例初始化时的 download_dir。
+
+        platform_title: 调用方显式标题（如批量表格），非空时优先于平台 desc。
+        """
         dest = Path(out_dir) if out_dir is not None else self.download_dir
         dest.mkdir(parents=True, exist_ok=True)
 
@@ -155,7 +165,7 @@ class DouyinParser:
 
         item_info = self._fetch_item_info(video_id, resolved_url)
         media_url = self._get_media_url(item_info, mode)
-        title = item_info.get("desc") or f"douyin_{video_id}"
+        title = (platform_title or "").strip() or item_info.get("desc") or f"douyin_{video_id}"
         safe_title = re.sub(r'[\\/*?:"<>|\n\r\t#@]', "_", title).strip("_. ")[:60]
         safe_title = re.sub(r'_+', '_', safe_title)
         if not safe_title:
@@ -168,16 +178,15 @@ class DouyinParser:
         self._download_file(media_url, filepath)
 
         try:
-            from video_title import apply_content_filename, content_title_enabled
+            from video_title import apply_content_filename
 
-            if content_title_enabled():
-                renamed = apply_content_filename(str(filepath), url, platform_title=title)
-                return {
-                    "filepath": renamed["filepath"],
-                    "filename": renamed["filename"],
-                    "title": renamed["title"],
-                    "ext": renamed["ext"],
-                }
+            renamed = apply_content_filename(str(filepath), url, platform_title=title)
+            return {
+                "filepath": renamed["filepath"],
+                "filename": renamed["filename"],
+                "title": renamed["title"],
+                "ext": renamed["ext"],
+            }
         except Exception:
             pass
 
@@ -291,19 +300,52 @@ class DouyinParser:
         raise ValueError("API 请求失败")
 
     def _fetch_via_share_page(self, video_id: str, resolved_url: str) -> dict:
-        """从分享页面 HTML 中解析视频信息"""
-        parsed = urlparse(resolved_url)
-        if "iesdouyin.com" in (parsed.netloc or ""):
-            share_url = resolved_url
-        else:
-            share_url = f"https://www.iesdouyin.com/share/video/{video_id}/"
+        """从分享页面 HTML 中解析视频信息。
 
+        近年 `/share/video/` 常出滑块验证码；`/share/note/{id}/` 仍常能返回 `_ROUTER_DATA`。
+        """
+        candidates: list[str] = []
+        parsed = urlparse(resolved_url or "")
+        host = (parsed.netloc or "").lower()
+        path = parsed.path or ""
+        # note 页目前比 video 页更少滑块；优先 note，再回退原 resolved / video
+        candidates.append(f"https://www.iesdouyin.com/share/note/{video_id}/")
+        if "iesdouyin.com" in host and "/share/" in path:
+            candidates.append(resolved_url)
+        candidates.append(f"https://www.iesdouyin.com/share/video/{video_id}/")
+
+        seen: set[str] = set()
+        last_err: Exception | None = None
+        for share_url in candidates:
+            key = share_url.split("?", 1)[0]
+            if key in seen:
+                continue
+            seen.add(key)
+            try:
+                return self._parse_share_page_html(share_url)
+            except Exception as e:
+                last_err = e
+                logger.debug("分享页解析失败 %s: %s", key, e)
+
+        raise ValueError(
+            f"分享页中未找到视频信息（页面结构可能已变更）: {last_err}"
+        )
+
+    def _parse_share_page_html(self, share_url: str) -> dict:
         resp = self.session.get(share_url, headers=MOBILE_HEADERS, timeout=self.timeout)
         resp.raise_for_status()
         html = resp.text or ""
 
         if "Please wait..." in html and "wci=" in html and "cs=" in html:
             html = self._solve_waf_and_retry(html, share_url)
+
+        # 滑块验证码中间页：无作品 JSON，直接失败以便尝试 note 等备用 URL
+        if (
+            "TTGCaptcha" in html
+            or "验证码中间页" in html
+            or ("verify_data" in html and "captchaOptions" in html)
+        ):
+            raise ValueError("分享页触发验证码")
 
         router_data = self._extract_router_data(html)
         if router_data:

@@ -1,12 +1,12 @@
 # X（Twitter）与 Instagram 关键词搜索接入说明
 
-> 状态：X 已实现（Apify）；Instagram 已实现（ScrapeCreators）  
-> 日期：2026-07-10  
+> 状态：X / Instagram 均已实现（Apify）  
+> 日期：2026-07-14（IG 搜索层由 ScrapeCreators 换为 Apify）  
 > 目标：对齐现有 YouTube「关键词搜索 → 互动/日期筛选 → 列表 → 下载」能力  
 > 范围：仅 **X**、**Instagram**；不做「收藏」筛选  
 > X 额外硬需求：转发 ≥ N、评论（回复）≥ N  
 > IG 额外硬需求：评论 ≥ N  
-> **本机生产完善**：须遵守 [`local-production-base-rules.md`](./local-production-base-rules.md) §2/§4；验收用 `smoke-x-keyword-download.md` / `smoke-instagram-keyword-download.md`；目标机依赖见基线 §3（`APIFY_TOKEN` / `SCRAPECREATORS_API_KEY` + 代理）。
+> **本机生产完善**：须遵守 [`local-production-base-rules.md`](./local-production-base-rules.md) §2/§4；验收用 `smoke-x-keyword-download.md` / `smoke-instagram-keyword-download.md`；目标机依赖见基线 §3（`APIFY_TOKEN` + 代理；TikTok 单链仍可选 `SCRAPECREATORS_API_KEY`）。
 
 ---
 
@@ -59,7 +59,7 @@
 |------|------------|--------------|-------------------|
 | **X** | Apify | [api-ninja/x-twitter-advanced-search](https://apify.com/api-ninja/x-twitter-advanced-search) | 约 $0.35 / 1,000 results |
 | **X 备选** | Apify | [mikolabs/x-twitter-advanced-search-tweet-scraper](https://apify.com/mikolabs/x-twitter-advanced-search-tweet-scraper) | 按 Actor 定价 |
-| **Instagram** | ScrapeCreators | `GET /v2/instagram/reels/search` | 约 $47 / 25k credits 起；credits 不过期 |
+| **Instagram** | Apify | [data-slayer/instagram-search-reels](https://apify.com/data-slayer/instagram-search-reels) | 约 $1.50–$2.50 / 1,000 results（Pay-per-event） |
 
 ### 不推荐作为主方案
 
@@ -165,81 +165,82 @@ backend/api_x_search.py      # POST /api/x/search 、可选 /api/x/search-downlo
 
 | 能力 | 支持方式 | 备注 |
 |------|----------|------|
-| 关键词 | `query` | ✅ |
-| 日期 | 请求参数 `date_posted` | ✅ 相对档：`last-hour` / `last-day` / `last-week` / `last-month` / `last-year` |
-| 点赞 ≥ | 返回 `like_count` → **本地过滤** | ✅ 硬需求；无服务端 min_likes |
-| 评论 ≥ | 返回 `comment_count` → **本地过滤** | ✅ 硬需求 |
-| 播放 ≥ | 返回 `video_play_count` / `video_view_count` → 本地过滤 | 可选，对齐 YouTube 播放 |
-| 精确日期 | 返回 `taken_at` → 本地再滤 | 若 UI 要「指定某一天」可用 |
-| 转发 ≥ | 无对应字段 | IG 不做 |
-| 收藏 ≥ | 响应基本无 save_count | 明确不做 |
+| 关键词 | Actor 输入 `query` | ✅ |
+| 日期 | Actor **无**服务端日期参数 → 用 `taken_at_date` **本地过滤** | ✅ 相对档 + 指定日 |
+| 点赞 ≥ | 返回 `like_count` → **本地过滤** | ✅ |
+| 评论 ≥ | 返回 `comment_count` → **本地过滤** | ✅ |
+| 播放 ≥ | 返回 `ig_play_count` / `play_count` → 本地过滤 | ✅ |
+| 转发 ≥ | 无对应产品需求 | IG 不做 |
+| 收藏 ≥ | 明确不做 | |
 
-### 5.2 API 调用
+说明：Apify Actor 输入仅 `query` + `maxPages`；互动/日期一律本地筛。无 `video_url` 时下载回退 yt-dlp（建议配 `INSTAGRAM_COOKIEFILE`）。
 
-```http
-GET https://api.scrapecreators.com/v2/instagram/reels/search
-  ?query={关键词}
-  &date_posted=last-week
-  &page=1
-Header: x-api-key: {SCRAPECREATORS_API_KEY}
+### 5.2 Apify 调用
+
+- Actor：`data-slayer/instagram-search-reels`（可用 `INSTAGRAM_SEARCH_ACTOR_ID` 覆盖）
+- 端点：`POST /v2/acts/{actor}/run-sync-get-dataset-items?token=...`
+- 输入示意：
+
+```json
+{
+  "query": "AI",
+  "maxPages": 2
+}
 ```
 
-文档：https://docs.scrapecreators.com/v2/instagram/reels/search
+文档：https://apify.com/data-slayer/instagram-search-reels
 
-### 5.3 响应关键字段（文档样例）
+### 5.3 响应关键字段
 
 | 字段 | 用途 |
 |------|------|
-| `shortcode` / `url` | 下载地址 |
-| `caption` | 标题/描述 |
-| `like_count` | 点赞筛选（硬需求） |
-| `comment_count` | 评论筛选（硬需求）/ 展示 |
-| `video_play_count` / `video_view_count` | 播放筛选/展示（可选） |
-| `taken_at` | 日期展示与本地精确过滤 |
+| `code` / `id` | shortcode / media id → 页面 URL |
+| `caption.text` | 标题/描述 |
+| `like_count` | 点赞筛选 |
+| `comment_count` | 评论筛选 |
+| `ig_play_count` / `play_count` | 播放筛选 |
+| `taken_at_date` | 日期展示与本地过滤 |
+| `video_url` | CDN 直下（优先） |
 | `video_duration` | 时长 |
+| `user.username` | uploader |
+| `thumbnail_url` | 封面 |
 
-说明：该端点通过 Google 索引绕过 IG 登录墙，结果**不如 YouTube 实时/完整**，产品文案需接受这一点。
+### 5.4 日期与前端映射
 
-### 5.4 日期参数与前端映射建议
+| 前端选项 | 本地过滤 |
+|----------|----------|
+| 全部 | 不滤日期 |
+| 近 24 小时 | `upload_date == 今日` |
+| 近一周 / 近一月 / 近一年 | `since ≤ upload_date < until` |
+| 指定日期 | `upload_date == 所选日` |
 
-| 前端选项（建议） | `date_posted` | 备注 |
-|------------------|---------------|------|
-| 全部 | 不传或忽略 | |
-| 近 24 小时 | `last-day` | |
-| 近一周 | `last-week` | |
-| 近一月 | `last-month` | |
-| 近一年 | `last-year` | |
-| 指定日期 | 不传 `date_posted`，用 `taken_at` 本地滤 | 或先拉 `last-month`/`last-year` 再滤 |
-
-### 5.5 建议统一输出字段
+### 5.5 统一输出字段
 
 | 字段 | 来源 |
 |------|------|
-| `id` | media id 或 shortcode |
-| `title` | `caption` 截断 |
-| `url` | `url` 或 `https://www.instagram.com/reel/{shortcode}/` |
-| `uploader` | owner username（若有） |
-| `like_count` | `like_count` |
-| `comment_count` | `comment_count` |
-| `view_count` | `video_play_count` 优先，否则 `video_view_count` |
-| `upload_date` | `taken_at` → `YYYYMMDD` |
-| `thumbnail` | 封面图（若有） |
-| `duration` | `video_duration` |
+| `id` | `id` 或 `code` |
+| `title` | `caption.text` 截断 |
+| `url` | `https://www.instagram.com/reel/{code}/` |
+| `video_url` | `video_url`（可空） |
+| `uploader` | `user.username` |
+| `like_count` / `comment_count` / `view_count` | 对应字段 |
+| `upload_date` | `taken_at_date` → `YYYYMMDD` |
 | `platform` | `"instagram"` |
 
-### 5.6 环境变量（建议）
+### 5.6 环境变量
 
 ```env
-SCRAPECREATORS_API_KEY=...
+APIFY_TOKEN=...
+INSTAGRAM_SEARCH_ACTOR_ID=data-slayer/instagram-search-reels
 INSTAGRAM_SEARCH_MAX_RESULTS=20
 INSTAGRAM_SEARCH_POOL=40
 ```
 
-### 5.7 建议后端文件
+### 5.7 后端文件
 
 ```
 backend/instagram_search.py
-backend/api_instagram_search.py   # POST /api/instagram/search 、可选 search-download
+backend/api_instagram_search.py   # POST /api/instagram/search 、 search-download
 ```
 
 ---
@@ -270,7 +271,7 @@ Content-Type: application/json
 说明：
 
 - **X**：`min_likes` → `min_faves`；`min_retweets` → `min_retweets`；`min_comments` → `min_replies`（均为服务端筛选）；`min_views` 可忽略或仅本地弱过滤；`min_retweets` 仅 X 使用
-- **IG**：`min_likes` / `min_comments` / `min_views` → 本地过滤；`date_filter` → 映射 `date_posted` 或 `taken_at`；忽略 `min_retweets`
+- **IG**：`min_likes` / `min_comments` / `min_views` / `date_filter` → 全部本地过滤（Apify 无服务端筛选项）；忽略 `min_retweets`
 
 ### 6.2 搜索并下载（可选二期）
 
@@ -327,7 +328,7 @@ UI 可与 `YoutubeSearchSection.vue` 共用布局模式；平台差异用文案�
 ## 8. 实现顺序建议
 
 1. **先做 X + Apify**（服务端点赞/转发/评论/日期最接近产品需求）
-2. **再做 IG + ScrapeCreators**（本地过滤点赞/评论/播放）
+2. **再做 IG + Apify**（`data-slayer/instagram-search-reels`；本地过滤点赞/评论/播放/日期）
 3. 两边都通后再接 `search-download` SSE
 4. 开源自建（twscrape / instagrapi）仅作灾备，不进默认路径
 
@@ -336,9 +337,9 @@ UI 可与 `YoutubeSearchSection.vue` 共用布局模式；平台差异用文案�
 - [x] X：关键词 + `min_faves` + `min_retweets` + `min_replies` + 日期区间 → 返回可点开的 `x.com/status/...`
 - [x] X：结果含 `like_count` / `retweet_count` / `comment_count`，且低于阈值的条目被滤掉
 - [ ] X：结果能被现有 yt-dlp 下载（必要时 Cookie）
-- [x] IG：关键词 + `date_posted` → 返回 reel URL
-- [x] IG：本地 `like_count` / `comment_count`（及可选 `video_play_count`）过滤正确
-- [ ] IG：yt-dlp 或直链可下载（注意登录墙，可能需 Cookie）
+- [x] IG：关键词（Apify Reels Search）→ 返回 reel URL + 可选 `video_url`
+- [x] IG：本地 `like_count` / `comment_count` / `ig_play_count` + 日期过滤正确
+- [ ] IG：CDN `video_url` 或 yt-dlp 可下载（无直链时建议 Cookie）
 - [x] 失败时错误信息可读（额度不足 / Actor 失败 / 无结果）
 
 ---
@@ -346,9 +347,9 @@ UI 可与 `YoutubeSearchSection.vue` 共用布局模式；平台差异用文案�
 ## 9. 风险与合规
 
 1. 均为**非官方**数据源，需法务评估 ToS / 商用合规
-2. Apify / ScrapeCreators 上游变更会导致字段或成功率波动，需监控失败率
-3. IG 关键词依赖索引，**时效与召回弱于 YouTube**
-4. X/IG 下载仍可能触发风控，下载 Cookie 与搜索 API Key 分开管理
+2. Apify Actor 上游变更会导致字段或成功率波动，需监控失败率
+3. IG 日期为本地过滤：召回池偏「相关/热门」时，近 24 小时等档可能更易空
+4. X/IG 下载仍可能触发风控，下载 Cookie 与搜索 API Token 分开管理
 5. 密钥只放环境变量 / secrets，勿写入仓库
 
 ---
@@ -359,8 +360,7 @@ UI 可与 `YoutubeSearchSection.vue` 共用布局模式；平台差异用文案�
 |------|-----|
 | Apify X Advanced Search（推荐） | https://apify.com/api-ninja/x-twitter-advanced-search |
 | Apify X Advanced Search（备选） | https://apify.com/mikolabs/x-twitter-advanced-search-tweet-scraper |
-| ScrapeCreators IG Reels Search | https://docs.scrapecreators.com/v2/instagram/reels/search |
-| ScrapeCreators IG 总览 | https://scrapecreators.com/instagram-api |
+| Apify IG Reels Keyword Search | https://apify.com/data-slayer/instagram-search-reels |
 | X 高级搜索运算符参考 | https://github.com/igorbrigadir/twitter-advanced-search |
 | 现有 YouTube 搜索 | `backend/youtube_search.py` |
 
@@ -369,6 +369,6 @@ UI 可与 `YoutubeSearchSection.vue` 共用布局模式；平台差异用文案�
 ## 11. 一句话结论
 
 - **X**：用 **Apify Advanced Search**，服务端做关键词 + 点赞（`min_faves`）+ 转发（`min_retweets`）+ 评论/回复（`min_replies`）+ 日期（+ 仅视频）  
-- **Instagram**：用 **ScrapeCreators Reels Search**，请求做关键词 + 日期档，本地做点赞 + 评论（+ 可选播放）；无转发  
+- **Instagram**：用 **Apify Reels Keyword Search**（`data-slayer/instagram-search-reels`），请求做关键词；本地做点赞 + 评论 + 播放 + 日期；无转发  
 - **收藏**：两边都不做  
-- **下载**：统一走现有 yt-dlp / bulk 流水线
+- **下载**：优先 CDN `video_url`，否则 yt-dlp / bulk 流水线

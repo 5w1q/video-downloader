@@ -316,11 +316,17 @@ def search_youtube(
             ydl.params["logger"] = _YtdlpErrorLogger(_capture_error)
             info = ydl.extract_info(search_url, download=False)
     except Exception as e:
-        raise ValueError(f"YouTube 搜索失败: {e}") from e
+        from downloader import friendly_download_error
+
+        raise ValueError(
+            f"YouTube 搜索失败: {friendly_download_error(e)}"
+        ) from e
 
     if not info:
         hint = errors[0] if errors else "无返回数据"
-        raise ValueError(f"YouTube 搜索失败: {hint}")
+        from downloader import friendly_download_error
+
+        raise ValueError(f"YouTube 搜索失败: {friendly_download_error(hint)}")
 
     entries = info.get("entries") or []
     matched: list[dict[str, Any]] = []
@@ -416,7 +422,9 @@ def search_youtube(
 
     if scanned == 0 and not matched and not below:
         hint = errors[0] if errors else "未获取到任何搜索结果（网络/地区限制或需 Cookie）"
-        raise ValueError(f"YouTube 搜索失败: {hint}")
+        from downloader import friendly_download_error
+
+        raise ValueError(f"YouTube 搜索失败: {friendly_download_error(hint)}")
 
     return {
         "query": q,

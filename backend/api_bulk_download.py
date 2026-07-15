@@ -17,14 +17,19 @@ from bulk_download_core import (
     fmt_sse,
     run_bulk_download_stream,
 )
-from bulk_urls import extract_urls_from_upload
+from bulk_urls import extract_entries_from_upload
 from bulk_zip_tokens import finalize_bulk_download, peek_bulk_zip, sweep_expired_bulk_tokens
+from downloader import friendly_download_error
 
 router = APIRouter(prefix="/api", tags=["批量下载"])
 
 
 class BulkUrlsRequest(BaseModel):
     urls: list[str] = Field(..., min_length=1, max_length=200)
+    # 与 urls 等长的可选标题，作统一命名回退
+    titles: list[str] | None = None
+    # 与 urls 等长的可选直链（如 IG CDN）；跳过/历史仍用 urls
+    download_urls: list[str] | None = None
     skip_completed: bool = True
     verify_file: bool = True
     format_id: str = "bestvideo+bestaudio/best"
@@ -194,20 +199,36 @@ async def bulk_download(
         )
     except ValueError as e:
         async def err_stream() -> AsyncIterator[str]:
-            yield fmt_sse({"event": "error", "message": str(e)})
+            yield fmt_sse({"event": "error", "message": friendly_download_error(e)})
 
         return sse_streaming_response(err_stream())
 
     async def event_stream() -> AsyncIterator[str]:
         try:
-            urls = extract_urls_from_upload(name, body)
+            entries = extract_entries_from_upload(name, body)
         except Exception as e:
-            yield fmt_sse({"event": "error", "message": f"解析文件失败: {e}"})
+            yield fmt_sse(
+                {
+                    "event": "error",
+                    "message": friendly_download_error(f"解析文件失败: {e}"),
+                }
+            )
             return
 
+        urls = [e["url"] for e in entries]
         if not urls:
             yield fmt_sse({"event": "error", "message": "文件中未识别到任何 http(s) 链接"})
             return
+
+        platform_titles = [(e.get("title") or "").strip() for e in entries]
+        # 全空则不传，避免无意义校验；有任一标题则整列传入
+        if not any(platform_titles):
+            platform_titles = None
+        download_urls = [
+            (e.get("download_url") or e["url"]).strip() for e in entries
+        ]
+        if download_urls == urls:
+            download_urls = None
 
         async for chunk in run_bulk_download_stream(
             urls,
@@ -219,6 +240,8 @@ async def bulk_download(
             delay=delay,
             source_name=name,
             deliver_files=do_deliver,
+            download_urls=download_urls,
+            platform_titles=platform_titles,
         ):
             yield chunk
 
@@ -227,22 +250,38 @@ async def bulk_download(
 
 @router.post("/bulk-download/urls")
 async def bulk_download_urls(body: BulkUrlsRequest):
-    """按 URL 列表批量下载（供 YouTube 预览后直接下载，无需重新搜索）。"""
-    urls: list[str] = []
+    """按 URL 列表批量下载（供预览勾选后直接下载，无需重新搜索）。"""
+    paired: list[tuple[str, str, str]] = []
     seen: set[str] = set()
-    for raw in body.urls:
+    titles_in = body.titles
+    dls_in = body.download_urls
+    for i, raw in enumerate(body.urls):
         u = str(raw or "").strip()
-        if not u.startswith(("http://", "https://")):
-            continue
-        if u in seen:
+        if not u.startswith(("http://", "https://")) or u in seen:
             continue
         seen.add(u)
-        urls.append(u)
-        if len(urls) >= 200:
+        t = ""
+        if titles_in is not None and i < len(titles_in):
+            t = str(titles_in[i] or "").strip()
+        dl = u
+        if dls_in is not None and i < len(dls_in):
+            cand = str(dls_in[i] or "").strip()
+            if cand.startswith("http"):
+                dl = cand
+        paired.append((u, t, dl))
+        if len(paired) >= 200:
             break
 
-    if not urls:
+    if not paired:
         raise HTTPException(status_code=400, detail="没有有效的 http(s) 链接")
+
+    urls = [p[0] for p in paired]
+    platform_titles = [p[1] for p in paired]
+    if not any(platform_titles):
+        platform_titles = None
+    download_urls = [p[2] for p in paired]
+    if download_urls == urls:
+        download_urls = None
 
     delay = max(0.0, min(float(body.delay_seconds), 60.0))
     sweep_expired_bulk_tokens()
@@ -255,7 +294,7 @@ async def bulk_download_urls(body: BulkUrlsRequest):
         )
     except ValueError as e:
         async def err_stream() -> AsyncIterator[str]:
-            yield fmt_sse({"event": "error", "message": str(e)})
+            yield fmt_sse({"event": "error", "message": friendly_download_error(e)})
 
         return sse_streaming_response(err_stream())
 
@@ -272,6 +311,8 @@ async def bulk_download_urls(body: BulkUrlsRequest):
             delay=delay,
             source_name=source,
             deliver_files=do_deliver,
+            download_urls=download_urls,
+            platform_titles=platform_titles,
         ):
             yield chunk
 

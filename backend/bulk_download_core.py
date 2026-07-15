@@ -15,7 +15,7 @@ from bulk_state import load_state, record_success, save_state, should_skip_url
 from bulk_zip_oss import oss_bulk_zip_enabled, upload_bulk_zip_get_download_url
 from bulk_zip_tokens import register_bulk_file, register_bulk_zip
 from douyin import DouyinParser, is_douyin_url
-from downloader import VideoDownloader
+from downloader import VideoDownloader, friendly_download_error
 from tiktok import TikTokParser, is_tiktok_url
 
 _downloader = VideoDownloader()
@@ -28,19 +28,7 @@ def fmt_sse(obj: dict) -> str:
 
 
 def _friendly_download_error(exc: BaseException) -> str:
-    msg = str(exc)
-    low = msg.lower()
-    if "sign in to confirm" in low or "not a bot" in low:
-        return (
-            "YouTube 要求登录验证（bot 检测）。请在生产环境配置 YOUTUBE_COOKIEFILE"
-            "（Netscape cookies.txt，勿复用 B 站 Cookie），并确认出口代理可用后重试。"
-        )
-    if "failed to load cookies" in low:
-        return (
-            "无法加载浏览器 Cookie。请改为导出 YouTube cookies.txt 并设置 YOUTUBE_COOKIEFILE，"
-            "或关闭占用 Cookie 数据库的浏览器后重试。"
-        )
-    return msg
+    return friendly_download_error(exc)
 
 
 def default_download_dir() -> Path:
@@ -69,10 +57,11 @@ def bulk_zip_limits() -> tuple[int, int]:
     return max_bytes, max_files
 
 
-def _remove_paths(paths: list[str]) -> None:
-    for fp in paths:
+def _remove_paths(paths: list) -> None:
+    for item in paths:
+        fp = item[0] if isinstance(item, (tuple, list)) and item else item
         try:
-            Path(fp).unlink(missing_ok=True)
+            Path(str(fp)).unlink(missing_ok=True)
         except OSError:
             pass
 
@@ -97,29 +86,54 @@ def _zip_compress_type(path: Path) -> int:
     return zipfile.ZIP_DEFLATED
 
 
-def _zip_file_list(file_paths: list[str], zip_path: str) -> dict[str, int]:
+def _zip_write_member(zf, path: Path, arcname: str) -> None:
+    """写入 ZIP 成员；arcname 为对外文件名（内容标题），流式写入避免大视频占内存。"""
+    safe = Path(arcname).name or path.name or "video.bin"
+    # ZipFile.write 对流式拷贝；含非 ASCII 时会自动打 UTF-8 语言编码标志
+    zf.write(str(path), arcname=safe, compress_type=_zip_compress_type(path))
+    if any(ord(c) > 127 for c in safe):
+        try:
+            zf.getinfo(safe).flag_bits |= 0x800
+        except KeyError:
+            pass
+
+
+def _zip_file_list(
+    file_paths: list,
+    zip_path: str,
+) -> dict[str, int]:
+    """打包文件列表。file_paths 元素为 str 路径，或 (path, arcname) 元组。"""
     import zipfile
 
     used: dict[str, int] = {}
     source_bytes = 0
     file_count = 0
     with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        for fp in file_paths:
+        for item in file_paths:
+            if isinstance(item, (tuple, list)) and len(item) >= 2:
+                fp, arc = str(item[0]), str(item[1] or "")
+            else:
+                fp, arc = str(item), ""
             p = Path(fp)
             if not p.is_file():
                 continue
             file_count += 1
             source_bytes += p.stat().st_size
-            base = p.name
+            base = Path(arc).name if arc else p.name
+            if not base:
+                base = p.name
             n = used.get(base, 0)
             used[base] = n + 1
             if n == 0:
                 arcname = base
             else:
-                arcname = f"{p.stem}_{n}{p.suffix}"
-            zf.write(p, arcname=arcname, compress_type=_zip_compress_type(p))
+                stem = Path(base).stem
+                suffix = Path(base).suffix
+                arcname = f"{stem}_{n}{suffix}"
+            _zip_write_member(zf, p, arcname)
     zip_bytes = Path(zip_path).stat().st_size
     return {"zip_bytes": zip_bytes, "source_bytes": source_bytes, "file_count": file_count}
+
 
 
 def _bulk_zip_staging_dir() -> Path:
@@ -131,7 +145,7 @@ def _bulk_zip_staging_dir() -> Path:
 
 async def _pack_and_publish_chunk(
     loop: asyncio.AbstractEventLoop,
-    file_paths: list[str],
+    file_paths: list,
     part_num: int,
 ) -> dict:
     fd, zip_path = tempfile.mkstemp(suffix=".zip", dir=str(_bulk_zip_staging_dir()))
@@ -159,13 +173,29 @@ async def _pack_and_publish_chunk(
         raise
 
 
-def download_one(url: str, format_id: str, output_dir: Path) -> dict:
+def download_one(
+    url: str,
+    format_id: str,
+    output_dir: Path,
+    *,
+    platform_title: str = "",
+    title_url: str = "",
+) -> dict:
+    """下载单条。url 为实际下载地址；title_url / platform_title 供统一命名。"""
     out = str(output_dir)
+    pt = (platform_title or "").strip()
+    tu = (title_url or "").strip()
     if is_douyin_url(url):
-        return _douyin.download(url, out_dir=out)
+        return _douyin.download(url, out_dir=out, platform_title=pt or None)
     if is_tiktok_url(url):
-        return _tiktok.download(url, out_dir=out)
-    return _downloader.download_video(url, format_id, out_dir=out)
+        return _tiktok.download(url, out_dir=out, platform_title=pt or None)
+    return _downloader.download_video(
+        url,
+        format_id,
+        out_dir=out,
+        platform_title=pt or None,
+        title_url=tu or None,
+    )
 
 
 async def run_bulk_download_stream(
@@ -181,6 +211,7 @@ async def run_bulk_download_stream(
     start_extra: dict | None = None,
     deliver_files: bool = False,
     download_urls: list[str] | None = None,
+    platform_titles: list[str] | None = None,
 ) -> AsyncIterator[str]:
     """对 URL 列表顺序下载，yield SSE 文本块。
 
@@ -188,10 +219,12 @@ async def run_bulk_download_stream(
     - deliver_files: 每下完一个文件就发浏览器可下载链接（不打 ZIP）
     - download_urls: 可选，与 urls 等长；跳过/历史用 urls[i]，实际下载用 download_urls[i]
       （Instagram 等：页面 URL 记历史，CDN video_url 直下）
+    - platform_titles: 可选，与 urls 等长；搜索侧标题，作命名回退
     """
     zip_registered = False
     zip_parts: list[dict] = []
-    chunk_paths: list[str] = []
+    # (filepath, arcname) — arcname 用下载结果 filename（内容标题），保证 ZIP 内名正确
+    chunk_paths: list[tuple[str, str]] = []
     chunk_bytes = 0
     chunk_max_bytes, chunk_max_files = bulk_zip_limits()
 
@@ -205,6 +238,15 @@ async def run_bulk_download_stream(
                 {
                     "event": "error",
                     "message": "download_urls 与 urls 长度不一致",
+                }
+            )
+            return
+
+        if platform_titles is not None and len(platform_titles) != len(urls):
+            yield fmt_sse(
+                {
+                    "event": "error",
+                    "message": "platform_titles 与 urls 长度不一致",
                 }
             )
             return
@@ -275,8 +317,22 @@ async def run_bulk_download_stream(
                     continue
 
             try:
+                pt = (
+                    (platform_titles[i] or "").strip()
+                    if platform_titles is not None
+                    else ""
+                )
+                # 命名/字幕用页面 URL（urls[i]）；实际下载可能是 CDN
                 result = await loop.run_in_executor(
-                    None, partial(download_one, dl_url, format_id, output_dir)
+                    None,
+                    partial(
+                        download_one,
+                        dl_url,
+                        format_id,
+                        output_dir,
+                        platform_title=pt,
+                        title_url=url,
+                    ),
                 )
                 fp = result.get("filepath", "")
                 if not fp or not os.path.isfile(fp):
@@ -296,12 +352,26 @@ async def run_bulk_download_stream(
                         yield fmt_sse(
                             {
                                 "event": "error",
-                                "message": f"生成浏览器下载链接失败: {e}",
+                                "message": friendly_download_error(
+                                    f"生成浏览器下载链接失败: {e}"
+                                ),
                             }
                         )
                 if actually_pack:
                     fsize = os.path.getsize(fp)
-                    chunk_paths.append(fp)
+                    arc = (fn or Path(fp).name or "video.mp4").strip() or "video.mp4"
+                    # 盘上若仍是裸 id，但已有可读 title，ZIP 内名强制用标题
+                    try:
+                        from video_title import looks_like_weak_title, sanitize_download_basename
+
+                        stem = Path(arc).stem
+                        if title and looks_like_weak_title(stem):
+                            safe = sanitize_download_basename(title)
+                            suf = Path(arc).suffix or ".mp4"
+                            arc = f"{safe}{suf}"
+                    except Exception:
+                        pass
+                    chunk_paths.append((fp, arc))
                     chunk_bytes += fsize
                     if len(chunk_paths) >= chunk_max_files or chunk_bytes >= chunk_max_bytes:
                         try:
@@ -319,7 +389,9 @@ async def run_bulk_download_stream(
                             yield fmt_sse(
                                 {
                                     "event": "error",
-                                    "message": f"打包 ZIP 分卷失败: {e}",
+                                    "message": friendly_download_error(
+                                        f"打包 ZIP 分卷失败: {e}"
+                                    ),
                                 }
                             )
                 if do_skip:
@@ -384,7 +456,9 @@ async def run_bulk_download_stream(
                     yield fmt_sse(
                         {
                             "event": "error",
-                            "message": f"打包 ZIP 分卷失败: {e}",
+                            "message": friendly_download_error(
+                                f"打包 ZIP 分卷失败: {e}"
+                            ),
                         }
                     )
             shutil.rmtree(str(output_dir), ignore_errors=True)

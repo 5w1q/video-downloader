@@ -95,6 +95,8 @@ export async function bulkDownloadStream(file, options = {}) {
  * 按 URL 列表批量下载（SSE），用于预览结果后直接下载。
  * @param {string[]} urls
  * @param {object} options
+ * @param {string[]} [options.titles] 与 urls 等长的标题（命名回退）
+ * @param {string[]} [options.downloadUrls] 与 urls 等长的直链（如 IG CDN）
  */
 export async function bulkDownloadUrlsStream(urls, options = {}) {
   const {
@@ -106,24 +108,36 @@ export async function bulkDownloadUrlsStream(urls, options = {}) {
     packForBrowser = false,
     deliverFiles = true,
     sourceName = 'preview',
+    titles,
+    downloadUrls,
     onEvent = () => {},
     signal,
   } = options
 
+  const payload = {
+    urls,
+    skip_completed: skipCompleted,
+    verify_file: verifyFile,
+    format_id: formatId,
+    delay_seconds: delaySeconds,
+    download_dir: typeof downloadDir === 'string' ? downloadDir : '',
+    pack_for_browser: packForBrowser,
+    deliver_files: deliverFiles,
+    source_name: sourceName,
+  }
+  if (Array.isArray(titles) && titles.length === urls.length) {
+    payload.titles = titles.map((t) => (typeof t === 'string' ? t : String(t || '')))
+  }
+  if (Array.isArray(downloadUrls) && downloadUrls.length === urls.length) {
+    payload.download_urls = downloadUrls.map((u) =>
+      typeof u === 'string' && /^https?:\/\//i.test(u) ? u : ''
+    )
+  }
+
   const res = await fetch('/api/bulk-download/urls', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      urls,
-      skip_completed: skipCompleted,
-      verify_file: verifyFile,
-      format_id: formatId,
-      delay_seconds: delaySeconds,
-      download_dir: typeof downloadDir === 'string' ? downloadDir : '',
-      pack_for_browser: packForBrowser,
-      deliver_files: deliverFiles,
-      source_name: sourceName,
-    }),
+    body: JSON.stringify(payload),
     signal,
   })
 

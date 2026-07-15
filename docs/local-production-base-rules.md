@@ -51,7 +51,7 @@
 | `YOUTUBE_COOKIEFILE` | `secrets/youtube_cookies.txt` | 与文件名一致；勿复用 B 站 Cookie |
 | `YTDLP_COOKIEFILE` | 可选 B 站 | 仅下 B 站需要 |
 | `YTDLP_JS_RUNTIMES` | 默认 `node` | 镜像内须有 Node + `yt-dlp-ejs` |
-| 第三方 Key | 按功能启用 | X→`APIFY_TOKEN`；IG→`SCRAPECREATORS_API_KEY`；总结→LLM/ASR |
+| 第三方 Key | 按功能启用 | X/IG→`APIFY_TOKEN`；TikTok→`SCRAPECREATORS_API_KEY`；总结→LLM/ASR |
 
 密钥与 Cookie **只进 `backend/secrets/` 与目标机本地 `.env`，禁止提交 Git、禁止打进镜像层。**
 
@@ -63,7 +63,7 @@
 | `youtube_cookies.txt`（Netscape） | YouTube 下载过 bot | `Sign in to confirm you're not a bot` |
 | Node（或 Deno）+ `yt-dlp-ejs` | 带 Cookie 时解 n-challenge | 仅 storyboard / `Requested format is not available` |
 | ffmpeg（镜像内） | 音视频合并 | 部分 format 失败 |
-| Apify / ScrapeCreators | X / IG **搜索** | 搜索失败；下载层仍走 yt-dlp |
+| Apify / ScrapeCreators | X/IG **搜索** / TikTok **单链** | 对应功能失败；其它平台下载仍走 yt-dlp |
 
 ### 2.4 产品行为一致性（三端关键词 + 批量）
 
@@ -91,7 +91,7 @@
 |------|------|----------|--------------|----------------|
 | YouTube 关键词搜索+下载 | `smoke-youtube-keyword-download.md`；公网优化见 `youtube-keyword-download-production-readiness.md`（仅作参考，本场景不关 LOCAL_MODE） | 浏览器按该文档最低集 | **已具备**（Cookie+代理+EJS 后可 `ok≥1`） | YouTube Cookie、代理、Node/EJS |
 | X 关键词 | `x-instagram-search-integration.md` + `smoke-x-keyword-download.md` | 浏览器按该文档最低集 | **交付机最低集已过**（2026-07-10）；待目标机验收 | `APIFY_TOKEN`、代理（下载） |
-| Instagram 关键词 | 同上 + `smoke-instagram-keyword-download.md` | 浏览器按该文档最低集 | **交付机最低集已过**（2026-07-10）；待目标机验收 | `SCRAPECREATORS_API_KEY`；下载优先 CDN `video_url` |
+| Instagram 关键词 | 同上 + `smoke-instagram-keyword-download.md` | 浏览器按该文档最低集 | **交付机最低集已过**（2026-07-10）；搜索层已换 Apify（2026-07-14） | `APIFY_TOKEN`；下载优先 CDN `video_url` |
 | 批量链接/表格下载 | `smoke-bulk-download.md` | 浏览器按该文档最低集 | **待确认** | 代理；B 站另需 bilibili Cookie |
 | 单链解析/下载 | `smoke-single-download.md`（**§8 当前问题汇总**） | 浏览器按该文档最低集 | **交付机最低集 29/30**（2026-07-10）；**P0：TikTok 仍 Fail** | 按站点 Cookie/代理；FB 文件名已修 |
 | AI 总结（可选） | `.env.example` ASR/LLM 段 | 手工 1 条 | **可选** | LLM Key；ASR 另需公网可达 URL（本机生产常关） |

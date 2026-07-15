@@ -285,7 +285,13 @@ class TikTokParser:
                     raise ValueError(f"TikTok 文件下载失败: {e}") from e
                 time.sleep(1 * (2**attempt))
 
-    def download(self, url: str, out_dir: Optional[str | Path] = None) -> dict[str, Any]:
+    def download(
+        self,
+        url: str,
+        out_dir: Optional[str | Path] = None,
+        *,
+        platform_title: Optional[str] = None,
+    ) -> dict[str, Any]:
         dest = Path(out_dir) if out_dir is not None else self.download_dir
         dest.mkdir(parents=True, exist_ok=True)
 
@@ -296,7 +302,8 @@ class TikTokParser:
             raise ValueError("未找到 TikTok 可下载视频地址")
 
         video_id = result.get("id") or _video_id_from_url(url) or "tiktok"
-        safe_title = _sanitize_filename(result.get("title") or f"tiktok_{video_id}")
+        title = (platform_title or "").strip() or result.get("title") or f"tiktok_{video_id}"
+        safe_title = _sanitize_filename(title)
         filename = f"{safe_title}.mp4"
         filepath = dest / filename
         # 同名冲突时用 id 区分
@@ -307,24 +314,21 @@ class TikTokParser:
         self._download_file(media_url, filepath)
 
         try:
-            from video_title import apply_content_filename, content_title_enabled
+            from video_title import apply_content_filename
 
-            if content_title_enabled():
-                renamed = apply_content_filename(
-                    str(filepath), url, platform_title=result.get("title") or ""
-                )
-                return {
-                    "filepath": renamed["filepath"],
-                    "filename": renamed["filename"],
-                    "title": renamed["title"],
-                    "ext": renamed["ext"],
-                }
+            renamed = apply_content_filename(str(filepath), url, platform_title=title)
+            return {
+                "filepath": renamed["filepath"],
+                "filename": renamed["filename"],
+                "title": renamed["title"],
+                "ext": renamed["ext"],
+            }
         except Exception:
             pass
 
         return {
             "filepath": str(filepath),
             "filename": filename,
-            "title": result.get("title") or safe_title,
+            "title": title,
             "ext": ".mp4",
         }

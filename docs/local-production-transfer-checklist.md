@@ -23,7 +23,7 @@
 | 项 | 说明 |
 |----|------|
 | `backend/secrets/bilibili_cookies.txt` | 仅当目标机要下 B 站 |
-| `APIFY_TOKEN` / `SCRAPECREATORS_API_KEY` | X / Instagram 关键词搜索 |
+| `APIFY_TOKEN` / `SCRAPECREATORS_API_KEY` | X/IG 关键词搜索；TikTok 单链 |
 | LLM / ASR Key | 仅当需要 AI 总结 |
 
 ### 1.3 不要拷 / 不要指望跨机复用

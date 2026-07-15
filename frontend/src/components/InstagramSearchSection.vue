@@ -290,6 +290,7 @@
 import { ref, computed, watch, nextTick } from 'vue'
 import { searchInstagram, instagramSearchDownloadStream } from '../api/instagram.js'
 import { bulkDownloadUrlsStream } from '../api/bulk.js'
+import { friendlyError } from '../api/friendlyError.js'
 
 defineProps({
   embedded: { type: Boolean, default: false },
@@ -341,6 +342,21 @@ const previewUrls = computed(() =>
   (previewResults.value || [])
     .map((item) => item?.url)
     .filter((u) => typeof u === 'string' && /^https?:\/\//i.test(u))
+)
+
+const previewTitles = computed(() =>
+  (previewResults.value || [])
+    .filter((item) => typeof item?.url === 'string' && /^https?:\/\//i.test(item.url))
+    .map((item) => (typeof item?.title === 'string' ? item.title : ''))
+)
+
+const previewDownloadUrls = computed(() =>
+  (previewResults.value || [])
+    .filter((item) => typeof item?.url === 'string' && /^https?:\/\//i.test(item.url))
+    .map((item) => {
+      const vu = typeof item?.video_url === 'string' ? item.video_url.trim() : ''
+      return /^https?:\/\//i.test(vu) ? vu : item.url
+    })
 )
 
 const primaryButtonLabel = computed(() => {
@@ -450,7 +466,7 @@ function onDownloadZipPart(part) {
     startBrowserZipDownload(part.url, name)
     pushLog(`已发起分卷 ${part.part} 下载（${formatBytes(part.zip_bytes)}）`)
   } catch (e) {
-    pushLog(`分卷 ${part.part} 下载失败：${e.message || e}`)
+    pushLog(`分卷 ${part.part} 下载失败：${friendlyError(e)}`)
   }
 }
 
@@ -504,7 +520,7 @@ function handleDownloadEvent(data) {
       pushLog(`[${data.index}/${data.total}] 成功 ${short} → ${data.filename || ''}`)
     } else if (data.status === 'fail') {
       failCount.value += 1
-      pushLog(`[${data.index}/${data.total}] 失败 ${short} — ${data.message || '未知错误'}`)
+      pushLog(`[${data.index}/${data.total}] 失败 ${short} — ${friendlyError(data.message || '未知错误')}`)
     }
   } else if (ev === 'done') {
     okCount.value = data.ok ?? okCount.value
@@ -531,7 +547,7 @@ function handleDownloadEvent(data) {
       scrollToZipActions()
     }
   } else if (ev === 'error') {
-    pushLog(`错误：${data.message || '未知错误'}`)
+    pushLog(`错误：${friendlyError(data.message || '未知错误')}`)
   }
 }
 
@@ -579,7 +595,7 @@ async function previewOnly() {
     }
   } catch (e) {
     hasPreviewReady.value = false
-    pushLog(`搜索失败：${e.message || e}`)
+    pushLog(`搜索失败：${friendlyError(e)}`)
   } finally {
     running.value = false
     phase.value = ''
@@ -605,6 +621,8 @@ async function downloadPreview() {
       packForBrowser: packForBrowser.value,
       deliverFiles: deliverFiles.value,
       sourceName: `instagram-preview:${query.value.trim() || 'results'}`,
+      titles: previewTitles.value,
+      downloadUrls: previewDownloadUrls.value,
       signal: abortController.value.signal,
       onEvent: handleDownloadEvent,
     })
@@ -612,7 +630,7 @@ async function downloadPreview() {
     if (e.name === 'AbortError') {
       pushLog('已取消（连接已断开，服务端可能仍在处理当前这一条）')
     } else {
-      pushLog(`请求异常：${e.message || e}`)
+      pushLog(`请求异常：${friendlyError(e)}`)
     }
   } finally {
     running.value = false
@@ -654,7 +672,7 @@ async function startSearchAndDownload() {
     if (e.name === 'AbortError') {
       pushLog('已取消（连接已断开，服务端可能仍在处理当前这一条）')
     } else {
-      pushLog(`请求异常：${e.message || e}`)
+      pushLog(`请求异常：${friendlyError(e)}`)
     }
   } finally {
     running.value = false

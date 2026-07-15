@@ -1,10 +1,10 @@
 # Instagram 关键词下载 — 冒烟测试
 
-> 日期：2026-07-10  
+> 日期：2026-07-14  
 > 范围：前端「关键词 / 批量下载 → Instagram 关键词」  
 > 入口：`#keyword-download` → Tab「Instagram 关键词」/ `#instagram-search`  
 > 相关：`InstagramSearchSection.vue`、`POST /api/instagram/search`、`POST /api/instagram/search-download`  
-> 搜索层：ScrapeCreators Reels Search（需 `SCRAPECREATORS_API_KEY`）；下载层：yt-dlp / bulk  
+> 搜索层：Apify Reels Keyword Search（需 `APIFY_TOKEN`；Actor `data-slayer/instagram-search-reels`）；下载层：CDN `video_url` / yt-dlp / bulk  
 > 本机生产完善顺序：[`local-production-base-rules.md`](./local-production-base-rules.md) §4 → 本文最低集 → 更新基线 §3 状态
 
 ---
@@ -27,7 +27,7 @@
 | 未达标列表 | 琥珀色 | ✅ |
 | 转发 / 收藏筛选 | 产品明确不做 | ❌ |
 
-> 与 YouTube/X 差异：日期多 **近一年**；「今日」文案为 **近 24 小时**（API `last-day`）。
+> 与 YouTube/X 差异：日期多 **近一年**；「今日」文案为 **近 24 小时**（本地按 `taken_at_date` 滤）。
 
 ---
 
@@ -39,7 +39,7 @@
 | 最多下载条数 | `2` |
 | 跳过已下载 | **勾选** |
 | 每条间隔（秒） | `1` |
-| 环境 | 已配置 `SCRAPECREATORS_API_KEY`；浏览器允许下载 |
+| 环境 | 已配置 `APIFY_TOKEN`；浏览器允许下载 |
 
 **阈值两档：**
 
@@ -52,14 +52,14 @@
 
 **发布日期：**
 
-| 值 | UI | API 映射（知悉） |
-|----|-----|------------------|
-| `all` | 不限 | 不传 date_posted |
-| `today` | 近 24 小时 | `last-day` |
-| `week` | 近一周 | `last-week` |
-| `month` | 近一月 | `last-month` |
-| `year` | 近一年 | `last-year` |
-| `date` | 指定日期 | 本地按 taken_at 滤 |
+| 值 | UI | 过滤方式 |
+|----|-----|----------|
+| `all` | 不限 | 不滤日期 |
+| `today` | 近 24 小时 | 本地 `upload_date == 今日` |
+| `week` | 近一周 | 本地近 7 天 |
+| `month` | 近一月 | 本地近 30 天 |
+| `year` | 近一年 | 本地近 365 天 |
+| `date` | 指定日期 | 本地按 `taken_at_date` 滤 |
 
 **保存：** 浏览器 / ZIP
 
@@ -121,7 +121,7 @@
 ## 5. 执行记录表
 
 > 执行：Cursor Agent · 2026-07-10 · `python scripts/smoke_instagram_keyword_download.py --min`  
-> 环境：本机 uvicorn `http://127.0.0.1:8001`，`SCRAPECREATORS_API_KEY` 已配置；下载走搜索返回的 CDN `video_url`（避免页面抓取需登录 Cookie）
+> 环境：本机 uvicorn `http://127.0.0.1:8001`；历史跑次用 ScrapeCreators。**2026-07-14 起搜索层改为 Apify**（需 `APIFY_TOKEN`）；下载仍优先 CDN `video_url`
 
 | ID | 执行人 | 日期 | 结果 (Pass/Fail/Skip) | 成功/跳过/失败 | 备注 |
 |----|--------|------|----------------------|----------------|------|
@@ -143,16 +143,15 @@
 
 **最低集结论：8/8 Pass**（日志：`docs/_smoke_ig_min_run.log` + `_smoke_ig_retry*.log`）
 
-冒烟中曾遇 ScrapeCreators 429/500，脚本已加退避重试；下载层已改为优先 CDN `video_url`。
+下载优先 CDN `video_url`；搜索层已切换 Apify（不再依赖 ScrapeCreators IG 端点）。
 
 ---
 
 ## 6. 已知限制
 
-- 结果来自 Google 索引绕过，**不如 YouTube 实时/完整**。
-- 点赞/评论/播放多为本地过滤；召回不足时易空。
-- 「近 24 小时」≠ 日历「今日」；缺 `taken_at` 的条目在部分档可能仍出现。
-- 需 ScrapeCreators 额度；Key 无效会直接失败；上游 Google 索引偶发 429/500，宜退避重试。
+- 点赞/评论/播放/日期均为本地过滤；召回池偏相关热门时，近 24 小时等档可能更易空。
+- 「近 24 小时」按本地日历日过滤；缺 `taken_at_date` 的条目在相对档可能仍出现。
+- 需 `APIFY_TOKEN` 与 Actor 额度；Token 无效/额度不足会直接失败。
 - 下载优先使用搜索结果中的 CDN `video_url`（页面 URL 仍用于展示与「跳过已下载」）；无 `video_url` 时回退 yt-dlp 抓页面（常需 `INSTAGRAM_COOKIEFILE` / 浏览器 Cookie）。
 - 跳过/ZIP 行为与其它平台共用 bulk 流水线。
 - 「保存到浏览器」与「打包 zip」最终都进浏览器下载；差异是逐文件 vs 先打包。

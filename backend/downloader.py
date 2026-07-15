@@ -306,6 +306,182 @@ def _is_transient_download_error(exc: BaseException) -> bool:
     return any(n in msg for n in needles)
 
 
+def _translate_technical_error(low: str) -> Optional[str]:
+    """匹配常见英文/技术报错，返回中文；未命中返回 None。"""
+    # —— 网络 / SSL / 代理（搜索与下载均常见）——
+    if (
+        "unexpected_eof_while_reading" in low
+        or "eof occurred in violation of protocol" in low
+        or "ssl: unexpected_eof" in low
+        or "ssleoferror" in low
+    ):
+        return "SSL 连接异常中断，请检查网络或代理后重试。"
+    if "certificate_verify_failed" in low or (
+        "ssl" in low and ("certificate" in low or "cert verify" in low)
+    ):
+        return "SSL 证书校验失败，请检查网络或代理配置后重试。"
+    if "ssl" in low and (
+        "handshake" in low or "wrong_version_number" in low or "protocol" in low
+    ):
+        return "SSL 握手失败，请检查网络或代理后重试。"
+    if (
+        "connection reset" in low
+        or "connection aborted" in low
+        or "remote end closed connection" in low
+        or "remotedisconnected" in low
+        or "server disconnected" in low
+    ):
+        return "连接被对端关闭，请检查网络或代理后重试。"
+    if "connection refused" in low:
+        return "连接被拒绝，请检查网络或目标服务是否可用。"
+    if (
+        "name or service not known" in low
+        or "temporary failure in name resolution" in low
+        or "getaddrinfo failed" in low
+        or "nodename nor servname" in low
+    ):
+        return "域名解析失败，请检查网络或 DNS 后重试。"
+    if "network is unreachable" in low or "no route to host" in low:
+        return "网络不可达，请检查网络连接后重试。"
+    if "unable to connect to proxy" in low or "proxyerror" in low or "proxy error" in low:
+        return "代理连接失败，请检查 HTTPS_PROXY / HTTP_PROXY 配置后重试。"
+    if "timed out" in low or "timeout" in low or "time out" in low:
+        return "请求超时，请检查网络或代理后重试。"
+    if "connecterror" in low or "connection error" in low:
+        return "无法建立网络连接，请检查网络或代理后重试。"
+    if "readerror" in low or "writeerror" in low:
+        return "网络读写失败，请稍后重试。"
+    if "remoteprotocolerror" in low or "incomplete message" in low:
+        return "远程服务响应异常，请稍后重试。"
+
+    # —— Cookie / 登录通用 ——
+    if "sign in to confirm" in low or "not a bot" in low:
+        return (
+            "YouTube 要求登录验证（bot 检测）。请配置 YOUTUBE_COOKIEFILE"
+            "（Netscape cookies.txt，勿复用 B 站 Cookie），并确认出口代理可用后重试。"
+        )
+    if "failed to load cookies" in low:
+        return (
+            "无法加载浏览器 Cookie。请改为导出 cookies.txt 并设置对应 Cookie 环境变量，"
+            "或关闭占用 Cookie 数据库的浏览器后重试。"
+        )
+
+    # —— X / Twitter：无视频 ——
+    if "no video could be found in this tweet" in low:
+        return (
+            "该帖未包含可下载的视频（可能是纯文字、仅图片或引用/转发帖）。"
+            "请换一条带原生视频的 X 链接后重试。"
+        )
+
+    # —— Instagram：无视频 / 风控 ——
+    if "there is no video in this post" in low:
+        return (
+            "该 Instagram 帖未包含可下载的视频（可能是纯图片或图文轮播）。"
+            "请换一条 Reel / 视频帖后重试。"
+        )
+    if "empty media response" in low:
+        return (
+            "Instagram 未返回媒体内容（帖子可能需登录、已删除、或匿名访问被限流）。"
+            "请配置 INSTAGRAM_COOKIEFILE 后重试。"
+        )
+    if "rate-limit" in low or "rate limit" in low:
+        return "访问过于频繁被限流。请稍后再试，或配置有效登录 Cookie 后重试。"
+    if "redirected to the login page" in low or (
+        "login required" in low and "instagram" in low
+    ):
+        return (
+            "Instagram 要求登录后才能访问该内容。"
+            "请配置 INSTAGRAM_COOKIEFILE（Netscape cookies.txt）后重试。"
+        )
+    if "only available for registered users" in low or "who follow this account" in low:
+        return "该 Instagram 内容仅对已关注用户可见，当前 Cookie 无法访问。"
+    if "unable to extract video url" in low and "instagram" in low:
+        return "无法从该 Instagram 帖提取视频地址，请确认链接有效并配置 Cookie 后重试。"
+
+    # —— YouTube：不可播 / 无视频 ——
+    if "private video" in low or "this video is private" in low:
+        return "该 YouTube 视频为私密视频，无法下载。"
+    if "members-only" in low or "join this channel to get access" in low:
+        return "该 YouTube 视频为会员专享，无法下载。"
+    if "confirm your age" in low or "age-restricted" in low or "age restricted" in low:
+        return (
+            "该 YouTube 视频有年龄限制。请配置含已登录账号的 YOUTUBE_COOKIEFILE 后重试。"
+        )
+    if "not made this video available in your country" in low or (
+        "not available in your country" in low
+    ):
+        return "该 YouTube 视频在当前地区不可用，请更换代理出口后重试。"
+    if "video unavailable" in low or "this video is no longer available" in low:
+        return "该 YouTube 视频不可用（可能已删除、设为私密或地区限制）。"
+    if "has been removed" in low and ("youtube" in low or "video" in low):
+        return "该视频已被删除，无法下载。"
+    if "requested format is not available" in low:
+        return "所选清晰度/格式不可用。请改用「最佳」或其它格式后重试。"
+
+    # —— 通用：无视频 / 仅图片 / 链接无效（批量下载也走这里）——
+    if "only images are available" in low:
+        return "该链接只有图片，没有可下载的视频。"
+    if (
+        "no video formats" in low
+        or "no formats found" in low
+        or "there is no video" in low
+        or "no video could be found" in low
+    ):
+        return "未找到可下载的视频（可能是纯文字、仅图片或内容已失效）。"
+    if "unsupported url" in low:
+        return "不支持该链接，或无法识别为可下载的视频地址。"
+    if "unable to extract" in low:
+        return "无法解析该链接中的视频信息，请确认链接有效后重试。"
+    if "http error 404" in low or "404: not found" in low:
+        return "链接不存在或内容已删除（HTTP 404）。"
+    if "http error 403" in low or "403: forbidden" in low:
+        return "访问被拒绝（HTTP 403），可能需要登录 Cookie 或更换代理。"
+    if "http error 429" in low or "too many requests" in low:
+        return "请求过于频繁（HTTP 429），请稍后重试。"
+    if "http error 5" in low or re.search(r"\b50[0-9]\b", low):
+        if "http" in low or "status" in low or "apify" in low:
+            return "远程服务暂时不可用，请稍后重试。"
+    return None
+
+
+def friendly_download_error(exc: BaseException | str) -> str:
+    """将常见 yt-dlp / 网络 / 平台英文报错转成中文（单条 / 批量 / 搜索共用）。"""
+    msg = (str(exc) if not isinstance(exc, str) else exc).strip()
+    if not msg:
+        return "下载失败"
+
+    low = msg.lower()
+    translated = _translate_technical_error(low)
+    if translated:
+        # 保留已有中文业务前缀，例如「Instagram 搜索请求失败：…」
+        m = re.match(r"^([^:：]{1,80})[:：]\s*", msg)
+        if m and any("\u4e00" <= ch <= "\u9fff" for ch in m.group(1)):
+            prefix = m.group(1).strip().rstrip(":：") + "："
+            # 避免前缀本身已是完整中文提示时重复拼接
+            if translated not in prefix:
+                return prefix + translated
+        return translated
+
+    # 中文前缀 + 未识别英文尾：去掉英文，避免控制台直接甩 SSL/堆栈
+    m = re.match(r"^([^:：]{1,80})[:：]\s*(.+)$", msg, re.DOTALL)
+    if m and any("\u4e00" <= ch <= "\u9fff" for ch in m.group(1)):
+        prefix = m.group(1).strip().rstrip(":：") + "："
+        tail = m.group(2).strip()
+        tail_zh = any("\u4e00" <= ch <= "\u9fff" for ch in tail)
+        if not tail_zh and re.search(r"[A-Za-z]{3,}", tail):
+            return prefix + "请稍后重试。"
+        return msg
+
+    # 纯中文业务文案
+    if any("\u4e00" <= ch <= "\u9fff" for ch in msg):
+        return msg
+
+    # 未知英文：不把原始堆栈甩给用户
+    if re.search(r"[A-Za-z]{4,}", msg):
+        return "操作失败，请稍后重试。"
+    return msg
+
+
 def _find_ffmpeg_path() -> Optional[str]:
     """查找 ffmpeg 可执行文件路径"""
     if shutil.which("ffmpeg"):
@@ -478,8 +654,20 @@ class VideoDownloader:
 
         return results[:15]
 
-    def download_video(self, url: str, format_id: str, out_dir: Optional[str] = None) -> dict:
-        """下载视频到服务器目录，返回文件路径和元数据。out_dir 为空时使用默认 DOWNLOAD_DIR。"""
+    def download_video(
+        self,
+        url: str,
+        format_id: str,
+        out_dir: Optional[str] = None,
+        *,
+        platform_title: Optional[str] = None,
+        title_url: Optional[str] = None,
+    ) -> dict:
+        """下载视频到服务器目录，返回文件路径和元数据。out_dir 为空时使用默认 DOWNLOAD_DIR。
+
+        platform_title: 搜索/调用方已知标题，优先于 yt-dlp title 作为命名回退。
+        title_url: 字幕/AI 命名用 URL（默认 = 下载 url；CDN 直下时可传页面 URL）。
+        """
         import time
 
         target_dir = out_dir if out_dir else self.DOWNLOAD_DIR
@@ -538,42 +726,96 @@ class VideoDownloader:
             break
 
         if not info:
-            raise ValueError(str(last_err) if last_err else "下载失败")
+            raise ValueError(
+                friendly_download_error(last_err) if last_err else "下载失败"
+            )
 
-        title = self._sanitize_filename(info.get("title", "video"))
-        ext = info.get("ext", "mp4")
-        filename = f"{title}.{ext}"
-        filepath = os.path.join(target_dir, filename)
+        yt_title = info.get("title", "video")
+        effective_title = (platform_title or "").strip() or yt_title
+        rename_url = (title_url or url).strip() or url
+        vid = str(info.get("id") or "").strip()
+        ext = (info.get("ext") or "mp4").strip() or "mp4"
 
-        if not os.path.exists(filepath):
-            if prepared_path and os.path.exists(prepared_path):
-                filepath = prepared_path
-                filename = os.path.basename(prepared_path)
-            else:
+        # 优先按 yt-dlp 实际落盘（id.ext / prepare_filename）定位，避免误用长标题路径
+        filepath = ""
+        candidates: list[str] = []
+        if prepared_path:
+            candidates.append(prepared_path)
+            # merge_output_format=mp4 时 prepare 可能仍带源后缀
+            stem_prep, _ = os.path.splitext(prepared_path)
+            candidates.append(stem_prep + ".mp4")
+        if vid:
+            for e in (ext, "mp4", "webm", "mkv", "m4a", "mov"):
+                candidates.append(os.path.join(target_dir, f"{vid}.{e}"))
+        for c in candidates:
+            if c and os.path.isfile(c):
+                filepath = c
+                break
+        if not filepath:
+            # 最后再扫目录：id 前缀或标题片段
+            try:
                 for f in os.listdir(target_dir):
-                    if title in f:
+                    low = f.lower()
+                    if not low.endswith(
+                        (".mp4", ".webm", ".mkv", ".m4a", ".mov", ".opus", ".mp3")
+                    ):
+                        continue
+                    if vid and (f == f"{vid}{os.path.splitext(f)[1]}" or f.startswith(f"{vid}.")):
                         filepath = os.path.join(target_dir, f)
-                        filename = f
                         break
-        platform_title = info.get("title", "video")
-        try:
-            from video_title import apply_content_filename, content_title_enabled
+                    title_guess = self._sanitize_filename(yt_title)
+                    if title_guess and title_guess in f:
+                        filepath = os.path.join(target_dir, f)
+                        break
+            except OSError:
+                pass
+        if not filepath or not os.path.isfile(filepath):
+            raise ValueError("下载完成但未找到输出文件")
 
-            if content_title_enabled():
-                renamed = apply_content_filename(filepath, url, platform_title=platform_title)
-                return {
-                    "filepath": renamed["filepath"],
-                    "filename": renamed["filename"],
-                    "title": renamed["title"],
-                    "ext": renamed["ext"],
-                }
+        filename = os.path.basename(filepath)
+        ext = os.path.splitext(filename)[1].lstrip(".") or ext
+
+        try:
+            from video_title import apply_content_filename
+
+            # 始终走统一命名：开关关闭时 generate_download_title 仅 sanitize platform_title
+            renamed = apply_content_filename(
+                filepath, rename_url, platform_title=effective_title
+            )
+            return {
+                "filepath": renamed["filepath"],
+                "filename": renamed["filename"],
+                "title": renamed["title"],
+                "ext": renamed["ext"],
+            }
+        except Exception:
+            pass
+
+        # 内容标题失败时，至少改成平台标题 ≤30，禁止对外长期暴露裸 id
+        try:
+            from pathlib import Path as _Path
+
+            from video_title import _unique_filepath, sanitize_download_basename
+
+            stem = sanitize_download_basename(effective_title)
+            src = _Path(filepath)
+            dest = _unique_filepath(src.parent, stem, ext)
+            if dest.resolve() != src.resolve():
+                src.rename(dest)
+                src = dest
+            return {
+                "filepath": str(src),
+                "filename": src.name,
+                "title": stem,
+                "ext": ext,
+            }
         except Exception:
             pass
 
         return {
             "filepath": filepath,
             "filename": filename,
-            "title": platform_title,
+            "title": effective_title,
             "ext": ext,
         }
 

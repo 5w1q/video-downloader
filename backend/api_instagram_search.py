@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 from api_bulk_download import resolve_bulk_output, sse_streaming_response
 from bulk_download_core import fmt_sse, run_bulk_download_stream
 from bulk_zip_tokens import sweep_expired_bulk_tokens
+from downloader import friendly_download_error
 from instagram_search import search_instagram
 
 router = APIRouter(prefix="/api", tags=["Instagram 搜索"])
@@ -50,7 +51,9 @@ async def instagram_search(body: InstagramSearchRequest):
     except ValueError as e:
         from fastapi import HTTPException
 
-        raise HTTPException(status_code=400, detail=str(e)) from e
+        raise HTTPException(
+            status_code=400, detail=friendly_download_error(e)
+        ) from e
     return result
 
 
@@ -96,7 +99,7 @@ async def instagram_search_download(
         )
     except ValueError as e:
         async def err_stream() -> AsyncIterator[str]:
-            yield fmt_sse({"event": "error", "message": str(e)})
+            yield fmt_sse({"event": "error", "message": friendly_download_error(e)})
 
         return sse_streaming_response(err_stream())
 
@@ -129,15 +132,20 @@ async def instagram_search_download(
                 ),
             )
         except ValueError as e:
-            yield fmt_sse({"event": "error", "message": str(e)})
+            yield fmt_sse({"event": "error", "message": friendly_download_error(e)})
             return
         except Exception as e:
-            yield fmt_sse({"event": "error", "message": f"Instagram 搜索失败: {e}"})
+            yield fmt_sse(
+                {
+                    "event": "error",
+                    "message": friendly_download_error(f"Instagram 搜索失败: {e}"),
+                }
+            )
             return
 
         results = found.get("results") or []
         urls = found.get("urls") or [r.get("url") for r in results if r.get("url")]
-        # 优先用 ScrapeCreators 返回的 CDN video_url 直下，避免 yt-dlp 抓页面需登录 Cookie
+        # 优先用 Apify 返回的 CDN video_url 直下，避免 yt-dlp 抓页面需登录 Cookie
         download_urls: list[str] = []
         for r in results:
             page = (r.get("url") or "").strip()
@@ -145,6 +153,10 @@ async def instagram_search_download(
             download_urls.append(vu if vu.startswith("http") else page)
         if len(download_urls) != len(urls):
             download_urls = list(urls)
+        # caption / 搜索 title：CDN 直下时 yt-dlp 标题弱，必须传入命名回退
+        platform_titles: list[str] | None = None
+        if results and len(results) == len(urls):
+            platform_titles = [(r.get("title") or "").strip() for r in results]
 
         yield fmt_sse(
             {
@@ -201,6 +213,7 @@ async def instagram_search_download(
             },
             deliver_files=do_deliver,
             download_urls=download_urls,
+            platform_titles=platform_titles,
         ):
             yield chunk
 
