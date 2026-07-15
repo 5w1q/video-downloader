@@ -322,18 +322,31 @@ async def run_bulk_download_stream(
                     if platform_titles is not None
                     else ""
                 )
-                # 命名/字幕用页面 URL（urls[i]）；实际下载可能是 CDN
-                result = await loop.run_in_executor(
-                    None,
-                    partial(
-                        download_one,
-                        dl_url,
-                        format_id,
-                        output_dir,
-                        platform_title=pt,
-                        title_url=url,
-                    ),
-                )
+                # 命名/字幕用页面 URL（urls[i]）；实际下载优先用直链（CDN）。
+                # 直链可能过期或绑抓取侧 IP（如 Instagram/Apify），失败时回退到
+                # 页面 URL，由 yt-dlp 重新解析出新鲜地址再下。
+                candidate_urls = [dl_url] if dl_url == url else [dl_url, url]
+                result = None
+                last_exc: BaseException | None = None
+                for cand in candidate_urls:
+                    try:
+                        result = await loop.run_in_executor(
+                            None,
+                            partial(
+                                download_one,
+                                cand,
+                                format_id,
+                                output_dir,
+                                platform_title=pt,
+                                title_url=url,
+                            ),
+                        )
+                        last_exc = None
+                        break
+                    except Exception as inner:
+                        last_exc = inner
+                if last_exc is not None:
+                    raise last_exc
                 fp = result.get("filepath", "")
                 if not fp or not os.path.isfile(fp):
                     raise RuntimeError("下载完成但未找到文件")
