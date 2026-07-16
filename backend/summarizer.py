@@ -763,6 +763,93 @@ class VideoSummarizer:
             text = text[:max_len]
         return text
 
+    def generate_filename_title(self, source_title: str, max_len: int = 20) -> str:
+        """把「视频源标题」转成用于文件名的简体中文短标题（非流式）。
+
+        规则：非简体中文（外文 / 繁体）→ 翻译为简体中文；超过 max_len 字则在
+        保持原意前提下概括到 max_len 以内；不含任何标点 / 符号。
+        """
+        prompt = self._build_filename_title_prompt(source_title, max_len)
+        response = self.client.chat.completions.create(
+            model=self.model,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "你是视频文件命名助手。只输出一条用于文件名的标题，"
+                        "必须使用简体中文（不要繁体），忠实保留源标题原意，"
+                        "不要解释、不要引号、不要任何标点或符号。"
+                    ),
+                },
+                {"role": "user", "content": prompt},
+            ],
+            stream=False,
+            temperature=0.3,
+            max_tokens=64,
+        )
+        text = (response.choices[0].message.content or "").strip()
+        text = text.splitlines()[0].strip() if text else ""
+        text = re.sub(r"^(标题|题目|文件名)\s*[:：]\s*", "", text)
+        text = text.strip(" \"'`「」『』")
+        if len(text) > max_len:
+            text = text[:max_len]
+        return text
+
+    def translate_to_simplified(self, texts: list[str]) -> list[str]:
+        """批量把多条文本翻译为简体中文（一次调用，保持顺序）。
+
+        返回与输入等长的列表；模型缺失某条或整体失败时，对应位置回退为原文。
+        用于搜索预览列表的展示标题（不改动下载命名所用的源标题）。
+        """
+        items = [(t or "").strip() for t in texts]
+        if not items:
+            return []
+
+        numbered = {str(i + 1): t for i, t in enumerate(items)}
+        prompt = self._build_translate_prompt(numbered)
+        system = (
+            "你是专业翻译。把 JSON 中每条文本翻译成通顺、忠实原意的简体中文，"
+            "保留人名、话题标签词（如 #xxx）与 @用户名。"
+            "严格按相同的键返回一个 JSON 对象，值为译文，不要添加多余说明。"
+        )
+        messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": prompt},
+        ]
+
+        content = ""
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                stream=False,
+                temperature=0.2,
+                max_tokens=2048,
+                response_format={"type": "json_object"},
+            )
+            content = response.choices[0].message.content or ""
+        except Exception:
+            # 部分 OpenAI 兼容端点不支持 response_format，去掉后再试一次
+            try:
+                response = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=messages,
+                    stream=False,
+                    temperature=0.2,
+                    max_tokens=2048,
+                )
+                content = response.choices[0].message.content or ""
+            except Exception:
+                return items
+
+        data = _parse_json_object(content)
+        out: list[str] = []
+        for i, original in enumerate(items):
+            val = data.get(str(i + 1)) if isinstance(data, dict) else None
+            text = str(val).strip() if val is not None else ""
+            out.append(text or original)
+        return out
+
     def chat_stream(self, subtitle_text: str, question: str):
         """基于视频内容的 AI 问答，流式返回"""
         prompt = self._build_chat_prompt(subtitle_text, question)
@@ -841,6 +928,36 @@ class VideoSummarizer:
 {truncated}"""
 
     @staticmethod
+    def _build_filename_title_prompt(source_title: str, max_len: int) -> str:
+        raw = (source_title or "").strip()[:2000]
+        return f"""下面是一个视频的「源标题」，请据此生成用于下载文件名的标题。
+
+硬性要求：
+1. 使用简体中文（源标题若为其它语言或繁体中文，请翻译为简体中文）
+2. 必须忠实保留源标题的原本含义，不要新增或臆造信息
+3. 源标题较长时，请在保持原意的前提下概括，最多 {max_len} 个字
+4. 只输出标题本身，不要换行，不要「标题：」等前缀
+5. 不要包含任何标点或特殊符号（如 ，。！？、,.!?:;"'|/\\#@ 等），只保留文字与数字
+
+源标题：
+{raw}"""
+
+    @staticmethod
+    def _build_translate_prompt(numbered: dict[str, str]) -> str:
+        payload = json.dumps(numbered, ensure_ascii=False)
+        return f"""请把下面 JSON 中的每条文本翻译成简体中文。
+
+要求：
+1. 忠实保留原意，语句通顺自然
+2. 已是简体中文的部分保持不变
+3. 保留人名、话题标签词（#xxx）与 @用户名
+4. 返回一个 JSON 对象，键与输入完全一致，值为对应的简体中文译文
+5. 只输出 JSON，不要任何解释或代码块标记
+
+待翻译 JSON：
+{payload}"""
+
+    @staticmethod
     def _build_chat_prompt(subtitle_text: str, question: str) -> str:
         truncated = subtitle_text[:12000]
         return f"""以下是一个视频的字幕内容，请根据这些内容回答用户的问题。
@@ -852,6 +969,35 @@ class VideoSummarizer:
 用户问题：{question}
 
 请基于视频内容给出准确、详细的回答。如果视频内容中没有相关信息，请诚实说明。"""
+
+
+def _parse_json_object(content: str) -> dict:
+    """从模型返回文本中解析出 JSON 对象；失败返回空 dict。
+
+    容忍 ```json 代码块包裹与首尾多余文本。
+    """
+    text = (content or "").strip()
+    if not text:
+        return {}
+    # 去掉 ```json ... ``` 代码块围栏
+    if text.startswith("```"):
+        text = re.sub(r"^```[a-zA-Z]*\s*", "", text)
+        text = re.sub(r"\s*```$", "", text).strip()
+    try:
+        obj = json.loads(text)
+        return obj if isinstance(obj, dict) else {}
+    except (json.JSONDecodeError, ValueError):
+        pass
+    # 兜底：截取第一个 { 到最后一个 }
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        try:
+            obj = json.loads(text[start : end + 1])
+            return obj if isinstance(obj, dict) else {}
+        except (json.JSONDecodeError, ValueError):
+            return {}
+    return {}
 
 
 def _time_to_seconds_flex(time_str: str) -> float:

@@ -1,8 +1,8 @@
 # 统一视频命名方案
 
-> 日期：2026-07-14  
-> 状态：规范已冻结；**YouTube / X / Instagram / 表格批量命名已接入**（§4.1–§4.3 + 通用 bulk）  
-> 目标：以单链下载的内容标题规则为**唯一标准**，对齐 YouTube / X / Instagram 关键词批量与通用批量下载的最终落盘文件名  
+> 日期：2026-07-15  
+> 状态：规范已冻结；**YouTube / X / Instagram / 表格批量命名已接入**（§4.1–§4.3 + 通用 bulk）；**命名依据改为视频源标题**（见 §1、§8 变更记录 2026-07-15）  
+> 目标：以「视频源标题 → 简体中文 → ≤ 20 字」为**唯一标准**，对齐 YouTube / X / Instagram 关键词批量与通用批量下载的最终落盘文件名  
 > 范围：服务端最终文件名（浏览器 `Content-Disposition` / SSE `filename` / ZIP 包内成员名）；不改 ZIP 包名、不新增前端自定义文件名 UI  
 > 相关实现：`backend/video_title.py`、`backend/downloader.py`、`backend/bulk_download_core.py`、`backend/douyin.py`、`backend/tiktok.py`、`backend/api_youtube_search.py`、`backend/api_x_search.py`、`backend/api_instagram_search.py`  
 > 本机生产完善顺序：[`local-production-base-rules.md`](./local-production-base-rules.md) §4 → 各平台 smoke → 本文 §5 命名专项验收
@@ -16,39 +16,43 @@
 ### 1.1 最终格式
 
 ```
-{sanitize 后短标题 ≤ 30 字}.{ext}
+{源标题 → 简体中文 → 去符号 → ≤ 20 字}.{ext}
 ```
 
 | 规则 | 行为 |
 |------|------|
-| 开关 | `CONTENT_TITLE_ON_DOWNLOAD`（默认 `1` / 开启；`0` / `false` / `off` 关闭） |
-| 主干长度 | `MAX_TITLE_LEN = 30` |
+| 命名依据 | **视频源标题**（`platform_title`；缺失时按链接解析源标题） |
+| 开关 | `CONTENT_TITLE_ON_DOWNLOAD`（默认 `1` / 开启；`0` / `false` / `off` 关闭仅做清洗） |
+| 主干长度 | `MAX_TITLE_LEN = 20` |
+| 语言 | 统一简体中文；非简体（外文 / 繁体）→ 翻译为简体中文 |
+| 符号 | 去除所有标点 / 符号 / emoji，只保留文字与数字 |
 | 扩展名 | 取自已下载文件（如 `mp4`、`webm`、`mp3`） |
-| 不含 | 日期、平台名前缀、uploader、upload_date（除非平台标题原文自带） |
-| 重名 | 同目录追加 `_2`、`_3`…（尽量保持主干 ≤ 30） |
+| 不含 | 日期、平台名前缀、uploader、upload_date |
+| 重名 | 同目录追加 `_2`、`_3`…（尽量保持主干 ≤ 20） |
 | 空/无效回退 | `video.{ext}` |
 
 ### 1.2 标题生成优先级
 
-`generate_download_title(url, platform_title=...)`：
+`generate_download_title(url, platform_title=...)`（**以源标题为准，不再抽字幕 / 总结内容**）：
 
-1. 对 `url` 抽取字幕 / 转写（`SubtitleExtractor`）
-2. 有字幕且已配置 LLM（`DEEPSEEK_API_KEY` / `SUMMARIZE_LLM_API_KEY`）→ `generate_short_title`（≤ 30 字）再 sanitize
-3. 有字幕但无 LLM / LLM 失败 → 字幕正文 sanitize 截断
-4. 无字幕 → sanitize(`platform_title`)
-5. 仍为空 → `video`
+1. 取源标题 = `platform_title`；为空时按 `url` 解析源标题（`_resolve_source_title`）
+2. 繁体 → 简体（`zhconv`）
+3. 已是简体中文且去符号后 ≤ 20 字 → 直接去符号截断（**不调用 LLM**）
+4. 非简体中文（外文 / 繁体等）**或** 超过 20 字 → LLM（`generate_filename_title`）：翻译为简体中文并在**保持原意**前提下概括到 ≤ 20 字
+5. LLM 未配置 / 失败 → 回退：源标题简体化 + 去符号 + 截断 ≤ 20
+6. 仍为空 → `video`
 
-关闭内容标题时（`CONTENT_TITLE_ON_DOWNLOAD=0`）：**直接** sanitize(`platform_title`)，不再抽字幕 / 调 LLM。规范要求此时对外 filename 仍为「平台标题清洗后 ≤ 30 字」，**不得**长期以裸 `{id}.{ext}` 作为对外名（见 §4.4）。
+关闭内容标题时（`CONTENT_TITLE_ON_DOWNLOAD=0`）：**直接** sanitize(源标题)（繁→简、去符号、截断 ≤ 20），不翻译 / 不调 LLM；**不得**长期以裸 `{id}.{ext}` 作为对外名（见 §4.4）。
 
 ### 1.3 清洗规则（`sanitize_download_basename`）
 
-- 去掉 `\ / * ? : " < > | # @`、控制字符、NBSP / 全角空格
+- **去除所有标点 / 符号 / emoji**（仅保留字母数字与中日韩文字、空格）
+- 去掉控制字符、NBSP / 全角空格
 - **含中文时繁体 → 简体**（`zhconv`，覆盖 YouTube / X / Instagram / 表格批量等所有入口）
-- 折叠连续空格与下划线
-- 去掉首尾装饰引号 / 书名号 / 括号
-- 截断至 `max_len`（默认 30）
+- 折叠连续空格
+- 截断至 `max_len`（默认 20）
 
-弱标题检测（`looks_like_weak_title`）：纯 ID 样、长数字串等，更应依赖字幕 / 显式传入的搜索 caption。
+弱标题检测（`looks_like_weak_title`）：纯 ID 样、长数字串等，用于 ZIP 成员名兜底。
 
 ### 1.4 下载中间态（实现细节，非最终对外名）
 
@@ -264,3 +268,4 @@ Excel / 纯 URL 批量：`extract_entries_from_upload` 识别可选 `title`/`cap
 | 2026-07-14 | X：`api_x_search` 推文截断 `title` → `platform_titles`，与 YouTube 同通道 |
 | 2026-07-14 | Instagram：CDN 仍直下；页面 URL + caption → 命名回退，修复弱 ID/`video` 文件名 |
 | 2026-07-14 | 通用批量：表格解析 title/CDN 列；`/bulk-download/urls` 支持 titles/download_urls；预览下载传标题；抖音/TikTok 接受显式 platform_title |
+| 2026-07-15 | 命名逻辑改版：改为**以视频源标题为准**（不再抽字幕/总结内容）；非简体中文自动翻译为简体；源标题超 20 字则保持原意概括至 ≤ 20 字；去除所有符号；`MAX_TITLE_LEN` 30 → 20；新增 `summarizer.generate_filename_title` |

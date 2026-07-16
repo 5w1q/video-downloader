@@ -564,7 +564,7 @@ def search_x(
     if scanned == 0 and not matched and not below:
         raise ValueError("X 搜索无结果（可放宽关键词/阈值后重试）")
 
-    return {
+    result = {
         "query": q,
         "search_query": search_query,
         "platform": "x",
@@ -591,3 +591,7 @@ def search_x(
         "urls": [m["url"] for m in matched],
         "below_threshold_results": below,
     }
+
+    from title_translate import annotate_result_titles
+
+    return annotate_result_titles(result)

@@ -220,6 +220,23 @@ def _enrich_entry(url: str) -> dict[str, Any]:
     return info
 
 
+def _is_live_entry(data: Any) -> bool:
+    """判断搜索条目是否为（正在/即将/刚结束仍处理中的）直播，用于跳过。
+
+    直播流用 bestvideo+bestaudio 下载不会结束，会拖垮整批（并触发 nginx 600s 超时）。
+    live_status='was_live' 表示直播已结束、已转为可下载的普通录像，不跳过。
+    """
+    if not isinstance(data, dict):
+        return False
+    status = (data.get("live_status") or "").strip().lower()
+    if status in ("is_live", "is_upcoming", "post_live"):
+        return True
+    # 部分 flat 结果无 live_status，仅有布尔 is_live
+    if data.get("is_live") is True and status not in ("was_live", "not_live"):
+        return True
+    return False
+
+
 def _result_item(
     *,
     vid: str,
@@ -336,6 +353,7 @@ def search_youtube(
     skipped_date = 0
     skipped_no_url = 0
     skipped_error = 0
+    skipped_live = 0
 
     require_known = min_views > 0 or min_likes > 0
 
@@ -347,6 +365,11 @@ def search_youtube(
         url = _video_url(entry)
         if not url:
             skipped_no_url += 1
+            continue
+
+        # 直播流不下载：flat 结果已带 live_status 时先行跳过，省去补全开销
+        if _is_live_entry(entry):
+            skipped_live += 1
             continue
 
         views = _as_int(entry.get("view_count"))
@@ -362,6 +385,10 @@ def search_youtube(
         try:
             full = _enrich_entry(url)
             if full:
+                # 补全后 live_status 才权威：flat 结果常缺该字段
+                if _is_live_entry(full):
+                    skipped_live += 1
+                    continue
                 views = _as_int(full.get("view_count")) if full.get("view_count") is not None else views
                 likes = _as_int(full.get("like_count")) if full.get("like_count") is not None else likes
                 title = full.get("title") or title
@@ -426,7 +453,7 @@ def search_youtube(
 
         raise ValueError(f"YouTube 搜索失败: {friendly_download_error(hint)}")
 
-    return {
+    result = {
         "query": q,
         "platform": "youtube",
         "max_results": max_results,
@@ -445,8 +472,13 @@ def search_youtube(
         "skipped_date": skipped_date,
         "skipped_no_url": skipped_no_url,
         "skipped_error": skipped_error,
+        "skipped_live": skipped_live,
         "total": len(matched),
         "results": matched,
         "urls": [m["url"] for m in matched],
         "below_threshold_results": below,
     }
+
+    from title_translate import annotate_result_titles
+
+    return annotate_result_titles(result)

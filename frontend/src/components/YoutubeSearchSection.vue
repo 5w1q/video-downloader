@@ -179,7 +179,7 @@
                 target="_blank"
                 rel="noopener noreferrer"
                 class="font-medium text-text-primary hover:text-primary line-clamp-1"
-              >{{ item.title }}</a>
+              >{{ item.title_display || item.title }}</a>
               <p class="mt-0.5 text-xs text-text-muted">
                 播放 {{ formatCount(item.view_count) }}
                 · 点赞 {{ formatCount(item.like_count) }}
@@ -199,7 +199,7 @@
                   target="_blank"
                   rel="noopener noreferrer"
                   class="font-medium text-text-secondary hover:text-primary line-clamp-1"
-                >{{ item.title }}</a>
+                >{{ item.title_display || item.title }}</a>
                 <p class="mt-0.5 text-xs text-amber-700">
                   {{ dateFilter === 'today' ? '今日播放' : '播放' }} {{ formatCount(item.view_count) }}
                   · 点赞 {{ formatCount(item.like_count) }}

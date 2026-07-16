@@ -347,92 +347,119 @@ async def run_bulk_download_stream(
                         last_exc = inner
                 if last_exc is not None:
                     raise last_exc
-                fp = result.get("filepath", "")
-                if not fp or not os.path.isfile(fp):
+                # 单帖多视频（如 X 多视频推文）会返回多个文件，全部投递 / 打包
+                dl_files = result.get("files") or [result]
+                valid_files = [
+                    f
+                    for f in dl_files
+                    if f.get("filepath") and os.path.isfile(f["filepath"])
+                ]
+                if not valid_files:
                     raise RuntimeError("下载完成但未找到文件")
 
-                fn = result.get("filename", "")
-                title = result.get("title", "")
+                # 首个文件用于历史记录与 item 展示
+                fn = valid_files[0].get("filename", "")
+                title = valid_files[0].get("title", "")
                 ok += 1
-                file_url = ""
-                if deliver_files and not actually_pack:
-                    try:
-                        file_url = await loop.run_in_executor(
-                            None,
-                            partial(_publish_single_file, fp, delete_after=True),
-                        )
-                    except Exception as e:
-                        yield fmt_sse(
-                            {
-                                "event": "error",
-                                "message": friendly_download_error(
-                                    f"生成浏览器下载链接失败: {e}"
-                                ),
-                            }
-                        )
-                if actually_pack:
-                    fsize = os.path.getsize(fp)
-                    arc = (fn or Path(fp).name or "video.mp4").strip() or "video.mp4"
-                    # 盘上若仍是裸 id，但已有可读 title，ZIP 内名强制用标题
-                    try:
-                        from video_title import looks_like_weak_title, sanitize_download_basename
+                file_parts: list[dict] = []
 
-                        stem = Path(arc).stem
-                        if title and looks_like_weak_title(stem):
-                            safe = sanitize_download_basename(title)
-                            suf = Path(arc).suffix or ".mp4"
-                            arc = f"{safe}{suf}"
-                    except Exception:
-                        pass
-                    chunk_paths.append((fp, arc))
-                    chunk_bytes += fsize
-                    if len(chunk_paths) >= chunk_max_files or chunk_bytes >= chunk_max_bytes:
+                for f in valid_files:
+                    fp = f["filepath"]
+                    ffn = f.get("filename", "") or Path(fp).name
+                    ftitle = f.get("title", "")
+                    if deliver_files and not actually_pack:
                         try:
-                            part = await flush_zip_chunk(force=True)
-                            if part:
-                                zip_registered = True
-                                yield fmt_sse(
-                                    {
-                                        "event": "zip_part",
-                                        **part,
-                                        "parts_ready": len(zip_parts),
-                                    }
+                            furl = await loop.run_in_executor(
+                                None,
+                                partial(_publish_single_file, fp, delete_after=True),
+                            )
+                            if furl:
+                                file_parts.append(
+                                    {"url": furl, "filename": ffn, "title": ftitle}
                                 )
                         except Exception as e:
                             yield fmt_sse(
                                 {
                                     "event": "error",
                                     "message": friendly_download_error(
-                                        f"打包 ZIP 分卷失败: {e}"
+                                        f"生成浏览器下载链接失败: {e}"
                                     ),
                                 }
                             )
+                    if actually_pack:
+                        fsize = os.path.getsize(fp)
+                        arc = (ffn or "video.mp4").strip() or "video.mp4"
+                        # 盘上若仍是裸 id，但已有可读 title，ZIP 内名强制用标题
+                        try:
+                            from video_title import (
+                                looks_like_weak_title,
+                                sanitize_download_basename,
+                            )
+
+                            stem = Path(arc).stem
+                            if ftitle and looks_like_weak_title(stem):
+                                safe = sanitize_download_basename(ftitle)
+                                suf = Path(arc).suffix or ".mp4"
+                                arc = f"{safe}{suf}"
+                        except Exception:
+                            pass
+                        chunk_paths.append((fp, arc))
+                        chunk_bytes += fsize
+                        if (
+                            len(chunk_paths) >= chunk_max_files
+                            or chunk_bytes >= chunk_max_bytes
+                        ):
+                            try:
+                                part = await flush_zip_chunk(force=True)
+                                if part:
+                                    zip_registered = True
+                                    yield fmt_sse(
+                                        {
+                                            "event": "zip_part",
+                                            **part,
+                                            "parts_ready": len(zip_parts),
+                                        }
+                                    )
+                            except Exception as e:
+                                yield fmt_sse(
+                                    {
+                                        "event": "error",
+                                        "message": friendly_download_error(
+                                            f"打包 ZIP 分卷失败: {e}"
+                                        ),
+                                    }
+                                )
                 if do_skip:
                     record_success(state, url, fn, title)
                     save_state(state)
 
+                # 多文件时 item 汇总展示；逐个文件另发 file_part 触发浏览器下载
+                display_fn = (
+                    fn if len(valid_files) == 1 else f"{fn} 等 {len(valid_files)} 个文件"
+                )
                 item_payload = {
                     "event": "item",
                     "index": idx,
                     "total": len(urls),
                     "url": url,
                     "status": "ok",
-                    "filename": fn,
+                    "filename": display_fn,
                     "title": title,
                 }
-                if file_url:
-                    item_payload["file_url"] = file_url
+                if file_parts:
                     item_payload["deliver"] = True
+                    if len(file_parts) == 1:
+                        item_payload["file_url"] = file_parts[0]["url"]
                 yield fmt_sse(item_payload)
-                if file_url:
+                for fpart in file_parts:
                     yield fmt_sse(
                         {
                             "event": "file_part",
                             "index": idx,
                             "total": len(urls),
-                            "url": file_url,
-                            "filename": fn,
-                            "title": title,
+                            "url": fpart["url"],
+                            "filename": fpart["filename"],
+                            "title": fpart["title"],
                         }
                     )
 

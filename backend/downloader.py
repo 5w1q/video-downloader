@@ -113,6 +113,22 @@ def _http_headers_for_url(url: str) -> dict[str, str]:
     return headers
 
 
+def _is_live_info(info: Any) -> bool:
+    """判断 yt-dlp info 是否为（正在/即将/刚结束仍处理中的）直播，需拒绝下载。
+
+    直播用 bestvideo+bestaudio 下载不会结束，会拖垮批次并触发上游超时。
+    live_status='was_live' 为已结束、已转普通录像，可正常下载，不拦。
+    """
+    if not isinstance(info, dict):
+        return False
+    status = (info.get("live_status") or "").strip().lower()
+    if status in ("is_live", "is_upcoming", "post_live"):
+        return True
+    if info.get("is_live") is True and status not in ("was_live", "not_live"):
+        return True
+    return False
+
+
 def _is_youtube_url(url: str) -> bool:
     u = (url or "").lower()
     return any(
@@ -681,6 +697,17 @@ class VideoDownloader:
         # 整次下载外层重试：覆盖代理断开 / SSL EOF（yt-dlp 内部 retries 有时不够）
         attempt_max = max(1, min(5, int(os.getenv("YTDLP_DOWNLOAD_ATTEMPTS", "3") or "3")))
 
+        # 拒绝直播：直播用 bestvideo+bestaudio 下载不会结束，会拖垮批次并触发上游超时。
+        # match_filter 在实际下载前判定，返回非空即跳过该条（不产生文件）。
+        live_rejected = False
+
+        def _reject_live(info_dict, *, incomplete=False):
+            nonlocal live_rejected
+            if _is_live_info(info_dict):
+                live_rejected = True
+                return "直播流不下载"
+            return None
+
         for attempt in range(1, attempt_max + 1):
             info = None
             prepared_path = ""
@@ -688,8 +715,12 @@ class VideoDownloader:
                 ydl_opts = {
                     **_ytdlp_base_opts(url),
                     "format": fmt,
-                    # 先用 id 落盘，避免 title 含 Windows 非法字符导致 Errno 22
-                    "outtmpl": os.path.join(target_dir, "%(id)s.%(ext)s"),
+                    "match_filter": _reject_live,
+                    # 先用 id 落盘，避免 title 含 Windows 非法字符导致 Errno 22。
+                    # id 截断到 50 字符：CDN 直链（如 IG fbcdn）的 id 会带完整查询串，
+                    # 不截断会让路径超长触发 Windows Errno 22（Invalid argument）。
+                    "outtmpl": os.path.join(target_dir, "%(id).50s.%(ext)s"),
+                    "trim_file_name": 120,
                     "windowsfilenames": True,
                     "quiet": True,
                     "no_warnings": True,
@@ -708,6 +739,8 @@ class VideoDownloader:
                         info = ydl.extract_info(url, download=True)
                         if info:
                             prepared_path = ydl.prepare_filename(info)
+                    if live_rejected:
+                        break
                     if info:
                         break
                 except Exception as e:
@@ -720,10 +753,15 @@ class VideoDownloader:
                     raise
             if info:
                 break
+            if live_rejected:
+                break
             if last_err and _is_transient_download_error(last_err) and attempt < attempt_max:
                 time.sleep(min(2 ** attempt, 15))
                 continue
             break
+
+        if live_rejected and not info:
+            raise ValueError("该链接为直播，已跳过（不下载直播）。")
 
         if not info:
             raise ValueError(
@@ -733,26 +771,85 @@ class VideoDownloader:
         yt_title = info.get("title", "video")
         effective_title = (platform_title or "").strip() or yt_title
         rename_url = (title_url or url).strip() or url
-        vid = str(info.get("id") or "").strip()
-        ext = (info.get("ext") or "mp4").strip() or "mp4"
 
-        # 优先按 yt-dlp 实际落盘（id.ext / prepare_filename）定位，避免误用长标题路径
-        filepath = ""
+        # 单帖多视频（如 X 多视频推文）会被 yt-dlp 当作 playlist 返回（noplaylist 对
+        # 这种「同一页面多媒体」无效），需遍历 entries 把每个视频都取回。
+        entries = info.get("entries")
+        entry_list = [info] if entries is None else [e for e in entries if e]
+
+        located: list[str] = []
+        seen_paths: set[str] = set()
+        for entry in entry_list:
+            # playlist 场景 prepared_path 是列表级名（.NA），对子项无意义，仅单视频时用
+            prep = prepared_path if entries is None else ""
+            fp = self._locate_downloaded_file(entry, target_dir, prep)
+            if not fp:
+                continue
+            key = os.path.normcase(os.path.abspath(fp))
+            if key not in seen_paths:
+                seen_paths.add(key)
+                located.append(fp)
+
+        if not located:
+            raise ValueError("下载完成但未找到输出文件")
+
+        # 命名标题按整帖计算一次，多个视频共用（_unique_filepath 自动加 _2/_3 去重），
+        # 避免为每个子视频重复调用 LLM。
+        try:
+            from video_title import generate_download_title
+
+            shared_title = generate_download_title(
+                rename_url, platform_title=effective_title
+            )
+        except Exception:
+            shared_title = ""
+
+        files_out = [
+            self._finalize_named_file(fp, shared_title, effective_title)
+            for fp in located
+        ]
+
+        first = files_out[0]
+        return {
+            "filepath": first["filepath"],
+            "filename": first["filename"],
+            "title": first["title"],
+            "ext": first["ext"],
+            "files": files_out,
+        }
+
+    @staticmethod
+    def _locate_downloaded_file(
+        entry: dict, target_dir: str, prepared_path: str = ""
+    ) -> str:
+        """定位单个 entry 实际落盘的媒体文件；找不到返回空串。
+
+        优先用 yt-dlp 记录的真实路径（requested_downloads/filepath），再回退到
+        按 id 拼名与目录扫描，兼顾单视频与多视频（playlist）两种返回结构。
+        """
         candidates: list[str] = []
+        for rd in (entry.get("requested_downloads") or []):
+            fp = rd.get("filepath")
+            if fp:
+                candidates.append(fp)
+        fp = entry.get("filepath")
+        if fp:
+            candidates.append(fp)
         if prepared_path:
             candidates.append(prepared_path)
             # merge_output_format=mp4 时 prepare 可能仍带源后缀
             stem_prep, _ = os.path.splitext(prepared_path)
             candidates.append(stem_prep + ".mp4")
+        vid = str(entry.get("id") or "").strip()
+        ext = (entry.get("ext") or "mp4").strip() or "mp4"
         if vid:
             for e in (ext, "mp4", "webm", "mkv", "m4a", "mov"):
                 candidates.append(os.path.join(target_dir, f"{vid}.{e}"))
         for c in candidates:
             if c and os.path.isfile(c):
-                filepath = c
-                break
-        if not filepath:
-            # 最后再扫目录：id 前缀或标题片段
+                return c
+        # 目录扫描兜底：id 前缀（outtmpl 固定用 %(id).50s，落盘必以 id 开头）
+        if vid:
             try:
                 for f in os.listdir(target_dir):
                     low = f.lower()
@@ -760,41 +857,41 @@ class VideoDownloader:
                         (".mp4", ".webm", ".mkv", ".m4a", ".mov", ".opus", ".mp3")
                     ):
                         continue
-                    if vid and (f == f"{vid}{os.path.splitext(f)[1]}" or f.startswith(f"{vid}.")):
-                        filepath = os.path.join(target_dir, f)
-                        break
-                    title_guess = self._sanitize_filename(yt_title)
-                    if title_guess and title_guess in f:
-                        filepath = os.path.join(target_dir, f)
-                        break
+                    if f == f"{vid}{os.path.splitext(f)[1]}" or f.startswith(f"{vid}."):
+                        return os.path.join(target_dir, f)
             except OSError:
                 pass
-        if not filepath or not os.path.isfile(filepath):
-            raise ValueError("下载完成但未找到输出文件")
+        return ""
 
-        filename = os.path.basename(filepath)
-        ext = os.path.splitext(filename)[1].lstrip(".") or ext
+    def _finalize_named_file(
+        self, filepath: str, shared_title: str, effective_title: str
+    ) -> dict:
+        """把落盘文件重命名为内容标题；失败回退平台标题，最终回退裸文件名。"""
+        from pathlib import Path as _Path
 
+        ext = os.path.splitext(filepath)[1].lstrip(".") or "mp4"
+
+        title = (shared_title or "").strip()
+        if title and title != "video":
+            try:
+                from video_title import _unique_filepath
+
+                src = _Path(filepath)
+                dest = _unique_filepath(src.parent, title, ext)
+                if dest.resolve() != src.resolve():
+                    src.rename(dest)
+                    src = dest
+                return {
+                    "filepath": str(src),
+                    "filename": src.name,
+                    "title": title,
+                    "ext": ext,
+                }
+            except Exception:
+                pass
+
+        # 内容标题不可用时，至少改成平台标题 ≤30，禁止对外长期暴露裸 id
         try:
-            from video_title import apply_content_filename
-
-            # 始终走统一命名：开关关闭时 generate_download_title 仅 sanitize platform_title
-            renamed = apply_content_filename(
-                filepath, rename_url, platform_title=effective_title
-            )
-            return {
-                "filepath": renamed["filepath"],
-                "filename": renamed["filename"],
-                "title": renamed["title"],
-                "ext": renamed["ext"],
-            }
-        except Exception:
-            pass
-
-        # 内容标题失败时，至少改成平台标题 ≤30，禁止对外长期暴露裸 id
-        try:
-            from pathlib import Path as _Path
-
             from video_title import _unique_filepath, sanitize_download_basename
 
             stem = sanitize_download_basename(effective_title)
@@ -814,7 +911,7 @@ class VideoDownloader:
 
         return {
             "filepath": filepath,
-            "filename": filename,
+            "filename": os.path.basename(filepath),
             "title": effective_title,
             "ext": ext,
         }

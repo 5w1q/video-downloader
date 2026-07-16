@@ -512,7 +512,7 @@ def search_instagram(
             "Instagram 搜索无结果（可放宽关键词/日期后重试）"
         )
 
-    return {
+    result = {
         "query": q,
         "date_posted": "",
         "platform": "instagram",
@@ -541,3 +541,7 @@ def search_instagram(
         "urls": [m["url"] for m in matched],
         "below_threshold_results": below,
     }
+
+    from title_translate import annotate_result_titles
+
+    return annotate_result_titles(result)

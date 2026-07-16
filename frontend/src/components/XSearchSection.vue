@@ -191,7 +191,7 @@
                 target="_blank"
                 rel="noopener noreferrer"
                 class="font-medium text-text-primary hover:text-primary line-clamp-1"
-              >{{ item.title }}</a>
+              >{{ item.title_display || item.title }}</a>
               <p class="mt-0.5 text-xs text-text-muted">
                 点赞 {{ formatCount(item.like_count) }}
                 · 转发 {{ formatCount(item.retweet_count) }}
@@ -212,7 +212,7 @@
                   target="_blank"
                   rel="noopener noreferrer"
                   class="font-medium text-text-secondary hover:text-primary line-clamp-1"
-                >{{ item.title }}</a>
+                >{{ item.title_display || item.title }}</a>
                 <p class="mt-0.5 text-xs text-amber-700">
                   点赞 {{ formatCount(item.like_count) }}
                   · 转发 {{ formatCount(item.retweet_count) }}

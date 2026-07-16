@@ -160,8 +160,15 @@ async def youtube_search_download(
         if not urls:
             skip_date = int(found.get("skipped_date") or 0)
             skip_thr = int(found.get("skipped_threshold") or 0)
+            skip_live = int(found.get("skipped_live") or 0)
             scanned = int(found.get("scanned") or 0)
-            if skip_date > 0 and df in ("today", "date"):
+            if skip_live > 0 and skip_date == 0 and skip_thr == 0:
+                msg = (
+                    f"没有可下载的视频。已扫描 {scanned + skip_live} 条，"
+                    f"其中 {skip_live} 条为直播已跳过（不下载直播）。"
+                    "请更换关键词后重试。"
+                )
+            elif skip_date > 0 and df in ("today", "date"):
                 label = "今日" if df == "today" else "所选日期"
                 msg = (
                     f"没有符合条件的视频。已扫描 {scanned} 条，"
